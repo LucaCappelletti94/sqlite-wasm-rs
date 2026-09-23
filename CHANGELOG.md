@@ -1,6 +1,17 @@
 # `sqlite-wasm-rs` Change Log
 --------------------------------------------------------------------------------
 
+## Unreleased
+
+### Changed
+
+* The `sqlite3mc` feature compiles the SQLite3 Multiple Ciphers amalgamation from
+  the `sqlite3mc-src` crate instead of a vendored copy, so native and wasm builds
+  in one workspace can share one SQLite3MC version.
+  `SQLITE_WASM_RS_SOURCE_DIR` still overrides it.
+
+--------------------------------------------------------------------------------
+
 ## [0.6.1](https://github.com/Spxg/sqlite-wasm-rs/compare/0.6.0...0.6.1)
 
 ### Changed
