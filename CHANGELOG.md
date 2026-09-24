@@ -1,6 +1,16 @@
 # `sqlite-wasm-rs` Change Log
 --------------------------------------------------------------------------------
 
+## Unreleased
+
+### Added
+
+* `threadsafe` feature in `rsqlite-vfs`, guarding memvfs with SQLite's mutexes
+  and giving its databases real lock levels, so connections on several threads
+  may share one database.
+
+--------------------------------------------------------------------------------
+
 ## [0.6.1](https://github.com/Spxg/sqlite-wasm-rs/compare/0.6.0...0.6.1)
 
 ### Changed
