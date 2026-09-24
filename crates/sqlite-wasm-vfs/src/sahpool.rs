@@ -412,11 +412,47 @@ impl SyncAccessFile {
     }
 }
 
+/// The worker whose JS realm holds a pool's handles, the only one allowed to call into the pool.
+#[derive(Clone, Copy)]
+struct Owner {
+    #[cfg(target_feature = "atomics")]
+    thread: std::thread::ThreadId,
+}
+
+impl Owner {
+    fn current() -> Self {
+        Self {
+            #[cfg(target_feature = "atomics")]
+            thread: std::thread::current().id(),
+        }
+    }
+
+    fn is_current(self) -> bool {
+        #[cfg(target_feature = "atomics")]
+        return std::thread::current().id() == self.thread;
+        #[cfg(not(target_feature = "atomics"))]
+        true
+    }
+
+    // Checked before any `Rc`, `RefCell` or JS handle is touched, since none of them may cross workers.
+    fn check(self) -> VfsResult<()> {
+        if self.is_current() {
+            Ok(())
+        } else {
+            Err(VfsError::new(
+                VfsErrorCode::Misuse,
+                "an OPFS SAH pool is usable only from the worker that installed it".into(),
+            ))
+        }
+    }
+}
+
 struct SyncAccessFileHandle {
     temporary_name: Option<String>,
     file: SyncAccessFile,
     read_only: bool,
     lock_level: LockLevel,
+    owner: Owner,
 }
 
 impl Drop for SyncAccessFileHandle {
@@ -456,6 +492,7 @@ impl VfsFile for SyncAccessFileHandle {
     }
 
     fn read(&mut self, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
+        self.owner.check()?;
         if buf.is_empty() {
             return Ok(0);
         }
@@ -467,6 +504,7 @@ impl VfsFile for SyncAccessFileHandle {
     }
 
     fn write(&mut self, buf: &[u8], offset: u64) -> VfsResult<()> {
+        self.owner.check()?;
         self.check_writable()?;
 
         if buf.is_empty() {
@@ -480,6 +518,7 @@ impl VfsFile for SyncAccessFileHandle {
     }
 
     fn truncate(&mut self, size: u64) -> VfsResult<()> {
+        self.owner.check()?;
         self.check_writable()?;
 
         let size = physical_offset(size, 0, VfsErrorCode::IoTruncate)?;
@@ -490,6 +529,7 @@ impl VfsFile for SyncAccessFileHandle {
     }
 
     fn sync(&mut self, _options: SyncOptions) -> VfsResult<()> {
+        self.owner.check()?;
         // OPFS has one flush primitive, used for both sync strengths and metadata.
         self.file
             .flush()
@@ -497,10 +537,12 @@ impl VfsFile for SyncAccessFileHandle {
     }
 
     fn size(&self) -> VfsResult<u64> {
+        self.owner.check()?;
         self.file.size()
     }
 
     fn lock(&mut self, level: LockLevel) -> VfsResult<()> {
+        self.owner.check()?;
         self.lock_level = self.lock_level.max(level);
 
         Ok(())
@@ -536,6 +578,7 @@ impl Drop for Operation<'_> {
 }
 
 struct OpfsSAHPool {
+    owner: Owner,
     last_error: RefCell<Option<VfsError>>,
     dh_opaque: FileSystemDirectoryHandle,
     lock_file: FileSystemFileHandle,
@@ -614,6 +657,7 @@ impl OpfsSAHPool {
                 .into();
 
         let pool = Rc::new(Self {
+            owner: Owner::current(),
             last_error: RefCell::new(None),
             dh_opaque,
             lock_file,
@@ -1148,6 +1192,11 @@ impl VfsStore for SyncAccessHandleStore {
         mut file: Self::File,
         options: OpenOptions,
     ) -> VfsResult<()> {
+        if let Err(error) = file.owner.check() {
+            // Dropping would flush a foreign JS handle and race on its `Rc`, so the slot stays counted as open.
+            std::mem::forget(file);
+            return Err(error);
+        }
         let temporary_name = file.temporary_name.take();
         let name = name
             .or(temporary_name.as_deref())
@@ -1169,17 +1218,23 @@ impl VfsStore for SyncAccessHandleStore {
     }
 
     fn record_error(data: &Self::AppData, error: VfsError) {
-        data.last_error.replace(Some(error));
+        if data.owner.is_current() {
+            data.last_error.replace(Some(error));
+        }
     }
 
     fn last_error(data: &Self::AppData) -> Option<VfsError> {
-        data.last_error.borrow().clone()
+        data.owner
+            .is_current()
+            .then(|| data.last_error.borrow().clone())
+            .flatten()
     }
 
     fn open_file(
         pool: &Self::AppData,
         request: rsqlite_vfs::OpenRequest<'_>,
     ) -> VfsResult<OpenedFile<Self::File>> {
+        pool.owner.check()?;
         let open = || -> Result<OpenedFile<Self::File>> {
             pool.check_active()?;
 
@@ -1237,6 +1292,7 @@ impl VfsStore for SyncAccessHandleStore {
                     temporary_name,
                     read_only: options.access() == OpenAccess::ReadOnly,
                     lock_level: LockLevel::None,
+                    owner: pool.owner,
                 },
                 access: options.access(),
             })
@@ -1246,6 +1302,7 @@ impl VfsStore for SyncAccessHandleStore {
     }
 
     fn access(pool: &Self::AppData, name: &str, _mode: AccessMode) -> VfsResult<bool> {
+        pool.owner.check()?;
         pool.check_active()
             .map_err(|err| err.vfs_err(VfsErrorCode::IoAccess))?;
 
@@ -1259,6 +1316,7 @@ impl VfsStore for SyncAccessHandleStore {
     }
 
     fn delete_file(pool: &Self::AppData, name: &str, _sync_dir: bool) -> VfsResult<()> {
+        pool.owner.check()?;
         // Always flush the slot header, including when sync_dir is false.
         pool.delete_file(name)
             .map_err(|err| err.vfs_err(VfsErrorCode::IoDelete))?;

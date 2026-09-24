@@ -142,6 +142,8 @@ jobs:
           -Clink-args=--export=__heap_base
       run: |
         wasm-pack test --chrome --headless --features wasm-bindgen,threadsafe -Z build-std=panic_abort,std --test threadsafe --test threadsafe_main_thread
+        cd crates/sqlite-wasm-vfs
+        wasm-pack test --chrome --headless --features sahpool -Z build-std=panic_abort,std --test sahpool_workers
 
   test_msrv:
     runs-on: ubuntu-latest
