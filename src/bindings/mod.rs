@@ -1,19 +1,20 @@
 //! Generated SQLite bindings and handwritten Rust compatibility helpers.
 
-#[cfg(all(not(feature = "bindgen"), feature = "sqlite3mc"))]
+#[cfg(all(not(feature = "bindgen"), not(feature = "sqlcipher"), feature = "sqlite3mc"))]
 mod sqlite3mc_bindgen;
 
-#[cfg(all(not(feature = "bindgen"), not(feature = "sqlite3mc")))]
+#[cfg(all(not(feature = "bindgen"), not(feature = "sqlcipher"), not(feature = "sqlite3mc")))]
 mod sqlite3_bindgen;
 
 mod bindgen {
-    #[cfg(feature = "bindgen")]
+    // build.rs writes this file, from bindgen or from sqlcipher-wasm-src.
+    #[cfg(any(feature = "bindgen", feature = "sqlcipher"))]
     include!(concat!(env!("OUT_DIR"), "/bindgen.rs"));
 
-    #[cfg(all(not(feature = "bindgen"), feature = "sqlite3mc"))]
+    #[cfg(all(not(feature = "bindgen"), not(feature = "sqlcipher"), feature = "sqlite3mc"))]
     pub use super::sqlite3mc_bindgen::*;
 
-    #[cfg(all(not(feature = "bindgen"), not(feature = "sqlite3mc")))]
+    #[cfg(all(not(feature = "bindgen"), not(feature = "sqlcipher"), not(feature = "sqlite3mc")))]
     pub use super::sqlite3_bindgen::*;
 }
 

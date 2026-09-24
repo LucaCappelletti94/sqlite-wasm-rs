@@ -33,6 +33,9 @@ const FULL_FEATURED: [&str; 23] = [
 #[cfg(feature = "sqlite3mc")]
 const SQLITE3_MC_FEATURED: [&str; 2] = ["-D__WASM__", "-DARGON2_NO_THREADS"];
 
+#[cfg(all(feature = "sqlite3mc", feature = "sqlcipher"))]
+compile_error!("features `sqlite3mc` and `sqlcipher` are mutually exclusive");
+
 const UPDATE_BINDGEN_ENV: &str = "SQLITE_WASM_RS_UPDATE_BINDGEN";
 const SOURCE_DIR_ENV: &str = "SQLITE_WASM_RS_SOURCE_DIR";
 
@@ -41,21 +44,28 @@ fn main() {
     println!("cargo::rerun-if-env-changed={SOURCE_DIR_ENV}");
     println!("cargo::rerun-if-changed=shim");
 
+    #[cfg(feature = "sqlcipher")]
+    let (default_dir, source_name, header_name) = (
+        sqlcipher_wasm_src::source_dir().to_path_buf(),
+        sqlcipher_wasm_src::WASM_SOURCE_FILE,
+        sqlcipher_wasm_src::HEADER_FILE,
+    );
     #[cfg(feature = "sqlite3mc")]
     let (default_dir, source_name, header_name) = (
-        "sqlite3mc",
+        PathBuf::from("sqlite3mc"),
         "sqlite3mc_amalgamation.c",
         "sqlite3mc_amalgamation.h",
     );
-    #[cfg(not(feature = "sqlite3mc"))]
-    let (default_dir, source_name, header_name) = ("sqlite3", "sqlite3.c", "sqlite3.h");
+    #[cfg(not(any(feature = "sqlite3mc", feature = "sqlcipher")))]
+    let (default_dir, source_name, header_name) =
+        (PathBuf::from("sqlite3"), "sqlite3.c", "sqlite3.h");
 
     let source_dir = match std::env::var_os(SOURCE_DIR_ENV) {
         Some(dir) => {
             assert!(!dir.is_empty(), "{SOURCE_DIR_ENV} must not be empty");
             PathBuf::from(dir)
         }
-        None => PathBuf::from(default_dir),
+        None => default_dir,
     };
     let source = source_dir.join(source_name);
     let header = source_dir.join(header_name);
@@ -79,12 +89,25 @@ fn main() {
         bindgen(&header, &output);
 
         if update_bindgen {
-            #[cfg(not(feature = "sqlite3mc"))]
+            #[cfg(all(not(feature = "sqlite3mc"), not(feature = "sqlcipher")))]
             const SQLITE3_BINDGEN: &str = "src/bindings/sqlite3_bindgen.rs";
             #[cfg(feature = "sqlite3mc")]
             const SQLITE3_BINDGEN: &str = "src/bindings/sqlite3mc_bindgen.rs";
+            // sqlcipher-wasm-src regenerates the sqlcipher bindings next to its sources.
+            #[cfg(not(feature = "sqlcipher"))]
             std::fs::copy(&output, SQLITE3_BINDGEN).unwrap();
         }
+    }
+
+    #[cfg(all(not(feature = "bindgen"), feature = "sqlcipher"))]
+    {
+        let output = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR env not set"))
+            .join("bindgen.rs");
+        std::fs::copy(
+            sqlcipher_wasm_src::source_dir().join(sqlcipher_wasm_src::BINDINGS_FILE),
+            output,
+        )
+        .expect("failed to copy sqlcipher bindings");
     }
 }
 
@@ -198,6 +221,12 @@ fn bindgen(header: &Path, output: &Path) {
     #[cfg(feature = "sqlite3mc")]
     {
         bindings = bindings.clang_args(SQLITE3_MC_FEATURED);
+    }
+
+    #[cfg(feature = "sqlcipher")]
+    {
+        // SQLITE_HAS_CODEC gates the sqlite3_key/rekey declarations in the header.
+        bindings = bindings.clang_arg("-DSQLITE_HAS_CODEC");
     }
 
     bindings = bindings
