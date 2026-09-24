@@ -14,7 +14,10 @@
   and giving its databases real lock levels, so connections on several threads
   may share one database.
 
---------------------------------------------------------------------------------
+### Changed
+
+* In shared-memory builds, `sahpool` refuses calls from any worker other than
+  the one that installed the pool, returning `SQLITE_MISUSE`.
 
 ## [0.6.1](https://github.com/Spxg/sqlite-wasm-rs/compare/0.6.0...0.6.1)
 

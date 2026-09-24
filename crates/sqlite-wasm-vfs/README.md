@@ -23,6 +23,6 @@ async fn install_vfs() {
 }
 ```
 
-Requires a secure context and a dedicated worker. Concurrent connections to the same database and WAL are not supported.
+Requires a secure context and a dedicated worker. Concurrent connections to the same database and WAL are not supported. In a shared-memory build, only the worker that installed a pool may use it, and other workers get `SQLITE_MISUSE`.
 
 [API documentation](https://docs.rs/sqlite-wasm-vfs)

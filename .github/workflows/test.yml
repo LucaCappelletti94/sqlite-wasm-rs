@@ -143,6 +143,10 @@ jobs:
       run: wasm-pack test --chrome --headless --features ${{ matrix.features }} -Z build-std=panic_abort,std
     - name: Test SQLite across workers sharing memory (${{ matrix.features }})
       run: wasm-pack test --chrome --headless --features ${{ matrix.features }},threadsafe -Z build-std=panic_abort,std
+    - name: Test SAH pool across workers sharing memory
+      if: matrix.features == 'wasm-bindgen'
+      working-directory: crates/sqlite-wasm-vfs
+      run: wasm-pack test --chrome --headless --features sahpool -Z build-std=panic_abort,std --test sahpool_workers
 
   test_msrv:
     runs-on: ubuntu-latest
