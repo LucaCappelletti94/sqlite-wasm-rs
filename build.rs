@@ -1,11 +1,17 @@
 use std::path::{Path, PathBuf};
 
+#[cfg(not(feature = "threadsafe"))]
+// All SQLite calls must remain single-threaded.
+const THREADSAFE: &str = "-DSQLITE_THREADSAFE=0";
+#[cfg(feature = "threadsafe")]
+// Serialized by default, with the atomics mutex from src/mutex.rs installed by shim/threadsafe.h.
+const THREADSAFE: &str = "-DSQLITE_THREADSAFE=1";
+
 // SQLite compile flags tuned for WASM: no threads/dlopen, keep common extensions.
 const FULL_FEATURED: [&str; 23] = [
     "-DSQLITE_OS_OTHER",
     "-DSQLITE_USE_URI",
-    // All SQLite calls must remain single-threaded.
-    "-DSQLITE_THREADSAFE=0",
+    THREADSAFE,
     "-DSQLITE_TEMP_STORE=2",
     "-DSQLITE_DEFAULT_CACHE_SIZE=-16384",
     "-DSQLITE_DEFAULT_PAGE_SIZE=8192",
@@ -284,6 +290,9 @@ fn compile(source: &Path) {
     for flag in FULL_FEATURED {
         cc.flag(flag);
     }
+
+    #[cfg(feature = "threadsafe")]
+    cc.flag("-include").flag("shim/threadsafe.h");
 
     #[cfg(feature = "sqlite3mc")]
     for flag in SQLITE3_MC_FEATURED {

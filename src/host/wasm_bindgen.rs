@@ -7,11 +7,17 @@ use wasm_bindgen::prelude::wasm_bindgen;
 use wasm_bindgen::JsValue;
 
 /// Sleeps using atomic waits, or returns immediately when atomics are unavailable.
+///
+/// With `threadsafe`, also returns immediately on threads that may not wait.
 #[export_name = "rust_sqlite_wasm_host_sleep"]
 pub extern "C" fn sleep(seconds: u64, nanoseconds: u32) {
     let duration = Duration::new(seconds, nanoseconds);
     #[cfg(target_feature = "atomics")]
     {
+        #[cfg(feature = "threadsafe")]
+        if !super::can_block() {
+            return;
+        }
         let mut nanos = duration.as_nanos();
         while nanos > 0 {
             let amount = core::cmp::min(i64::MAX as u128, nanos);
@@ -25,6 +31,29 @@ pub extern "C" fn sleep(seconds: u64, nanoseconds: u32) {
     // Browsers provide no synchronous sleep here without atomics. Do not busy-wait.
     #[cfg(not(target_feature = "atomics"))]
     let _ = duration;
+}
+
+#[cfg(all(feature = "threadsafe", target_feature = "atomics"))]
+#[wasm_bindgen(inline_js = r#"
+export function can_block() {
+    try {
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 1, 0);
+        return true;
+    } catch {
+        return false;
+    }
+}
+"#)]
+extern "C" {
+    #[wasm_bindgen(js_name = can_block)]
+    fn js_can_block() -> bool;
+}
+
+/// Reports whether this thread may wait, which browsers forbid on the main thread.
+#[cfg(all(feature = "threadsafe", target_feature = "atomics"))]
+#[export_name = "rust_sqlite_wasm_host_can_block"]
+pub extern "C" fn can_block() -> i32 {
+    i32::from(js_can_block())
 }
 
 /// Fills a buffer using Web Crypto, falling back to non-cryptographic randomness.

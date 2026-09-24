@@ -25,6 +25,9 @@ wasm-bindgen = ["dep:wasm-bindgen", "dep:js-sys"]
 # <https://github.com/utelle/SQLite3MultipleCiphers>
 # <https://utelle.github.io/SQLite3MultipleCiphers>
 sqlite3mc = []
+# Builds SQLite with SQLITE_THREADSAFE=1 and an atomics-based mutex, and makes memvfs thread-safe.
+# Threads need shared memory: build with `-Ctarget-feature=+atomics` and `--shared-memory`.
+threadsafe = ["rsqlite-vfs/threadsafe"]
 
 [build-dependencies]
 cc = "1"
@@ -32,6 +35,7 @@ bindgen = { version = "0.73", default-features = false, features = ["runtime", "
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3.78"
+wasm-bindgen-futures = "0.4.78"
 
 [[test]]
 name = "sqlite3"
@@ -40,6 +44,14 @@ required-features = ["wasm-bindgen"]
 [[test]]
 name = "sqlite3mc"
 required-features = ["wasm-bindgen", "sqlite3mc"]
+
+[[test]]
+name = "threadsafe"
+required-features = ["wasm-bindgen", "threadsafe"]
+
+[[test]]
+name = "threadsafe_main_thread"
+required-features = ["wasm-bindgen", "threadsafe"]
 
 [package.metadata.docs.rs]
 targets = ["wasm32-unknown-unknown"]

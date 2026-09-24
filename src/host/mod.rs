@@ -11,9 +11,10 @@
 //!
 //! # Hook contract
 //!
-//! Calls are single-threaded and may occur during initialization. Do not
-//! reenter SQLite, panic, or retain pointers. Pointers address Wasm linear
-//! memory; JavaScript receives `i64` arguments as `BigInt`.
+//! Without the `threadsafe` feature, calls are single-threaded. With it, any
+//! worker sharing the module may call a hook concurrently. Calls may occur
+//! during initialization. Do not reenter SQLite, panic, or retain pointers.
+//! Pointers address Wasm linear memory, and JavaScript receives `i64` arguments as `BigInt`.
 //!
 //! Fallible hooks return [`OK`] or an [`Error`] discriminant, not SQLite codes
 //! or errno; unknown nonzero codes mean unavailable. On success, fully write
@@ -27,6 +28,11 @@
 //! `fill_entropy` must fill the buffer securely or fail, never fall back to
 //! weak randomness; SQLite3MC may abort on failure. `localtime` converts Unix
 //! seconds to local time or fails, without a UTC fallback.
+//!
+//! With `threadsafe` and shared memory, a sixth hook,
+//! `int32_t rust_sqlite_wasm_host_can_block(void)`, returns nonzero when the
+//! calling thread may wait in `memory.atomic.wait32` and zero where the host
+//! forbids it, such as a browser main thread. Mutexes spin where it returns zero.
 
 use core::fmt;
 use core::time::Duration;
@@ -111,6 +117,32 @@ mod ffi {
         pub fn fill_entropy(buf: *mut u8, len: usize) -> i32;
         #[link_name = "rust_sqlite_wasm_host_localtime"]
         pub fn localtime(unix_seconds: i64, out: *mut LocalTime) -> i32;
+        #[cfg(all(feature = "threadsafe", target_feature = "atomics"))]
+        #[link_name = "rust_sqlite_wasm_host_can_block"]
+        pub fn can_block() -> i32;
+    }
+}
+
+/// Whether this thread may sleep in `memory.atomic.wait32`, asked once per thread.
+#[cfg(all(feature = "threadsafe", target_feature = "atomics"))]
+pub(crate) fn can_block() -> bool {
+    use core::cell::Cell;
+
+    const UNKNOWN: u8 = 0;
+    const YES: u8 = 1;
+    const NO: u8 = 2;
+    #[thread_local]
+    static CAN_BLOCK: Cell<u8> = Cell::new(UNKNOWN);
+
+    match CAN_BLOCK.get() {
+        YES => true,
+        NO => false,
+        _ => {
+            // SAFETY: the hook takes no arguments and only inspects the calling thread.
+            let answer = unsafe { ffi::can_block() } != 0;
+            CAN_BLOCK.set(if answer { YES } else { NO });
+            answer
+        }
     }
 }
 

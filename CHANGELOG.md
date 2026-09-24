@@ -5,6 +5,11 @@
 
 ### Added
 
+* `threadsafe` feature in `sqlite-wasm-rs`, compiling SQLite with
+  `SQLITE_THREADSAFE=1` and a mutex on Wasm atomics, so workers sharing one
+  module and memory can use SQLite concurrently. Custom hosts built with shared
+  memory implement one more hook, `rust_sqlite_wasm_host_can_block`.
+
 * `threadsafe` feature in `rsqlite-vfs`, guarding memvfs with SQLite's mutexes
   and giving its databases real lock levels, so connections on several threads
   may share one database.
