@@ -1,0 +1,51 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>threadsafe-bench</title>
+<script type="module">
+  import { runBench, runStress } from './orchestrator.mjs';
+
+  const params = new URLSearchParams(location.search);
+  const send = (path, body) => fetch(path, { method: 'POST', body: JSON.stringify(body) });
+  const base = new URL('.', location.href);
+  const platform = {
+    runtime: params.get('runtime'),
+    version: navigator.userAgent,
+    opfs: typeof navigator.storage?.getDirectory === 'function',
+    importGlue: (variant) => import(`./pkg/${variant}/threadsafe_bench.js`),
+    compile: (variant) => WebAssembly.compileStreaming(fetch(`./pkg/${variant}/threadsafe_bench_bg.wasm`)),
+    glueUrl: (variant) => new URL(`./pkg/${variant}/threadsafe_bench.js`, base).href,
+    spawn() {
+      const worker = new Worker('./worker.mjs', { type: 'module' });
+      return {
+        worker,
+        post: (m, t) => worker.postMessage(m, t),
+        onMessage: (f) => { worker.onmessage = (e) => f(e.data); },
+        onError: (f) => { worker.onerror = (e) => f(e.message || 'worker error event'); },
+      };
+    },
+    terminate: (handle) => handle.worker.terminate(),
+    channel: () => new MessageChannel(),
+  };
+
+  try {
+    if (!crossOriginIsolated) throw new Error('page is not cross-origin isolated');
+    await send('/environment', { runtime: platform.runtime, version: platform.version, cpus: navigator.hardwareConcurrency, opfs: platform.opfs });
+    if (params.has('stress')) await runStress(platform, { rounds: Number(params.get('stress')), log: (line) => send('/log', { line }) });
+    else await runBench(platform, {
+      variants: params.get('variants').split(','),
+      plan: params.get('plan')?.split(','),
+      workloads: params.get('workloads')?.split(','),
+      quick: params.has('quick'),
+      counts: params.get('counts')?.split(',').map(Number),
+      rounds: params.has('rounds') ? Number(params.get('rounds')) : undefined,
+      runMs: params.has('run-ms') ? Number(params.get('run-ms')) : undefined,
+      reserveMb: params.has('reserve-mb') ? Number(params.get('reserve-mb')) : undefined,
+      emit: (row) => send('/row', row),
+      log: (line) => send('/log', { line }),
+    });
+    await send('/done', {});
+  } catch (error) {
+    // Safari's stack omits the message, so both are sent.
+    await send('/fail', { error: `${error?.message ?? error}\n${error?.stack ?? ''}` });
+  }
+</script>
