@@ -62,7 +62,7 @@ By default SQLite is compiled with `-DSQLITE_THREADSAFE=0`, so all SQLite calls 
 The `threadsafe` feature compiles SQLite with `-DSQLITE_THREADSAFE=1` and a mutex built on Wasm atomics, and makes the memory VFS shareable between workers. Workers that share one module and its memory need a nightly shared-memory build:
 
 ```sh
-CFLAGS_wasm32_unknown_unknown=-matomics \
+CFLAGS_wasm32_unknown_unknown="-matomics -mbulk-memory" \
 RUSTFLAGS="-Ctarget-feature=+atomics -Clink-args=--shared-memory -Clink-args=--import-memory \
   -Clink-args=--max-memory=1073741824 -Clink-args=--export=__wasm_init_tls -Clink-args=--export=__tls_size \
   -Clink-args=--export=__tls_align -Clink-args=--export=__tls_base -Clink-args=--export=__heap_base" \

@@ -2,16 +2,32 @@
 #![cfg(target_feature = "atomics")]
 
 #[path = "../../../tests/support/workers.rs"]
-mod workers;
+pub mod workers;
 
 use sqlite_wasm_rs::*;
 use sqlite_wasm_vfs::sahpool::{install, OpfsSAHPoolCfgBuilder};
 use std::ffi::{CStr, CString};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
+use wasm_bindgen::JsValue;
 use wasm_bindgen_test::wasm_bindgen_test;
 
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+/// A task whose future runs on the worker's own event loop, for work that awaits browser APIs.
+fn async_task<F>(work: impl FnOnce() -> F + Send + 'static) -> workers::Task
+where
+    F: std::future::Future<Output = ()> + 'static,
+{
+    Box::new(move || {
+        let work = work();
+        wasm_bindgen_futures::future_to_promise(async move {
+            work.await;
+            Ok(JsValue::UNDEFINED)
+        })
+        .into()
+    })
+}
 
 const VFS: &CStr = c"sahpool-owner";
 const OTHER_VFS: &CStr = c"sahpool-other";
@@ -97,7 +113,7 @@ async fn other_workers_are_refused() {
     let query = Arc::new(std::sync::Mutex::new((SQLITE_OK, 0)));
     let other = {
         let (owner, open_rc, query) = (owner.clone(), open_rc.clone(), query.clone());
-        workers::async_task(move || async move {
+        async_task(move || async move {
             // This worker's own pool fills its handle table the way the owner's pool filled the owner's.
             install_pool(OTHER_VFS).await;
             let (rc, own) = open("other.db", OTHER_VFS);

@@ -129,7 +129,8 @@ jobs:
       run: wasm-pack test --chrome --headless --features wasm-bindgen -Z build-std=panic_abort,std
     - name: Test SQLite across workers sharing memory
       env:
-        CFLAGS_wasm32_unknown_unknown: -matomics
+        # SQLite3MC links the thread-local errno, whose TLS needs bulk memory.
+        CFLAGS_wasm32_unknown_unknown: -matomics -mbulk-memory
         RUSTFLAGS: >-
           -Ctarget-feature=+atomics
           -Clink-args=--shared-memory
@@ -142,6 +143,7 @@ jobs:
           -Clink-args=--export=__heap_base
       run: |
         wasm-pack test --chrome --headless --features wasm-bindgen,threadsafe -Z build-std=panic_abort,std --test threadsafe --test threadsafe_main_thread
+        wasm-pack test --chrome --headless --features wasm-bindgen,threadsafe,sqlite3mc -Z build-std=panic_abort,std --test threadsafe --test threadsafe_main_thread
         cd crates/sqlite-wasm-vfs
         wasm-pack test --chrome --headless --features sahpool -Z build-std=panic_abort,std --test sahpool_workers
 

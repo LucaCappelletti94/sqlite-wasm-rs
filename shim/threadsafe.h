@@ -1,3 +1,6 @@
+/* Custom amalgamations that force SQLITE_MUTEX_NOOP should skip it when this is defined. */
+#define SQLITE_WASM_RS_THREADSAFE 1
+
 /* Makes SQLite's default mutex the atomics mutex from src/mutex.rs. */
 struct sqlite3_mutex_methods;
 const struct sqlite3_mutex_methods *rust_sqlite_wasm_mutex_methods(void);

@@ -102,12 +102,12 @@ async fn concurrent_increments_lose_no_update() {
     const INCREMENTS: usize = 100;
     const DB: &str = "workers-increments.db";
 
-    let setup = scenarios::create_counter(DB);
+    let setup = scenarios::create_counter(DB, &|_| {});
     let start = Arc::new(StartLine::new(WORKERS));
     let tasks = (0..WORKERS)
         .map(|_| {
             let start = start.clone();
-            workers::task(move || scenarios::increment(DB, INCREMENTS, &|| start.wait()))
+            workers::task(move || scenarios::increment(DB, INCREMENTS, &|_| {}, &|| start.wait()))
         })
         .collect();
     workers::spawn(tasks, TIMEOUT_MS).await.unwrap();
@@ -122,7 +122,7 @@ async fn readers_see_only_committed_states() {
     const PAIRS: usize = 100;
     const DB: &str = "workers-snapshots.db";
 
-    let setup = scenarios::create_pairs(DB);
+    let setup = scenarios::create_pairs(DB, &|_| {});
     let start = Arc::new(StartLine::new(WRITERS + READERS));
     let writers_done = Arc::new(AtomicUsize::new(0));
     let reads = Arc::new(AtomicUsize::new(0));
@@ -130,7 +130,7 @@ async fn readers_see_only_committed_states() {
     for writer in 0..WRITERS {
         let (start, writers_done) = (start.clone(), writers_done.clone());
         tasks.push(workers::task(move || {
-            scenarios::write_pairs(DB, writer, PAIRS, &|| start.wait());
+            scenarios::write_pairs(DB, writer, PAIRS, &|_| {}, &|| start.wait());
             writers_done.fetch_add(1, Ordering::Release);
         }));
     }
@@ -138,7 +138,7 @@ async fn readers_see_only_committed_states() {
         let (start, writers_done, reads) = (start.clone(), writers_done.clone(), reads.clone());
         tasks.push(workers::task(move || {
             let done = || writers_done.load(Ordering::Acquire) == WRITERS;
-            let count = scenarios::read_pairs(DB, &done, &|| start.wait());
+            let count = scenarios::read_pairs(DB, &done, &|_| {}, &|| start.wait());
             reads.fetch_add(count, Ordering::Relaxed);
         }));
     }
@@ -157,7 +157,7 @@ async fn workers_share_one_serialized_connection() {
     const UPDATES: usize = 100;
     const DB: &str = "workers-shared-connection.db";
 
-    let shared = Arc::new(scenarios::create_counter(DB));
+    let shared = Arc::new(scenarios::create_counter(DB, &|_| {}));
     let start = Arc::new(StartLine::new(WORKERS));
     let tasks = (0..WORKERS)
         .map(|_| {
@@ -175,4 +175,60 @@ async fn workers_share_one_serialized_connection() {
     let shared: Connection = Arc::into_inner(shared).unwrap();
     scenarios::assert_counter(&shared, WORKERS * UPDATES);
     shared.close();
+}
+
+#[cfg(feature = "sqlite3mc")]
+#[wasm_bindgen_test]
+async fn encrypted_increments_lose_no_update() {
+    const WORKERS: usize = 8;
+    const INCREMENTS: usize = 100;
+    // The URI routes through SQLite3MC's cipher wrapper around memvfs, which holds the key.
+    const DB: &str = "file:workers-encrypted.db?vfs=multipleciphers-memvfs";
+    const KEY: &str = "PRAGMA key = 'threadsafe passphrase';";
+
+    let setup = Connection::open(DB);
+    setup.exec(KEY);
+    setup.exec("CREATE TABLE counter(n INTEGER NOT NULL); INSERT INTO counter VALUES (0);");
+    let start = Arc::new(StartLine::new(WORKERS));
+    let tasks = (0..WORKERS)
+        .map(|_| {
+            let start = start.clone();
+            workers::task(move || {
+                scenarios::increment(DB, INCREMENTS, &|connection| connection.exec(KEY), &|| {
+                    start.wait()
+                })
+            })
+        })
+        .collect();
+    workers::spawn(tasks, TIMEOUT_MS).await.unwrap();
+    scenarios::assert_counter(&setup, WORKERS * INCREMENTS);
+    setup.close();
+
+    // Without the key the pages stay ciphertext, so the workers really wrote through the cipher.
+    let name = std::ffi::CString::new("workers-encrypted.db").unwrap();
+    let mut db = std::ptr::null_mut();
+    // SAFETY: both strings are NUL-terminated and `db` is a valid out pointer.
+    let rc = unsafe {
+        sqlite_wasm_rs::sqlite3_open_v2(
+            name.as_ptr(),
+            &mut db,
+            sqlite_wasm_rs::SQLITE_OPEN_READONLY,
+            c"memvfs".as_ptr(),
+        )
+    };
+    assert_eq!(rc, SQLITE_OK);
+    let mut stmt = std::ptr::null_mut();
+    // SAFETY: `db` is open and the SQL is NUL-terminated.
+    let rc = unsafe {
+        sqlite_wasm_rs::sqlite3_prepare_v2(
+            db,
+            c"SELECT n FROM counter".as_ptr(),
+            -1,
+            &mut stmt,
+            std::ptr::null_mut(),
+        )
+    };
+    assert_eq!(rc, sqlite_wasm_rs::SQLITE_NOTADB);
+    // SAFETY: preparation failed, so only the connection is left to close.
+    assert_eq!(unsafe { sqlite_wasm_rs::sqlite3_close(db) }, SQLITE_OK);
 }

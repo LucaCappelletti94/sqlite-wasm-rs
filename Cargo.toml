@@ -53,6 +53,12 @@ required-features = ["wasm-bindgen", "threadsafe"]
 name = "threadsafe_main_thread"
 required-features = ["wasm-bindgen", "threadsafe"]
 
+# Needs SQLITE_WASM_RS_SOURCE_DIR pointing at a SQLCipher amalgamation, so it only runs when named.
+[[test]]
+name = "threadsafe_sqlcipher"
+required-features = ["wasm-bindgen", "threadsafe"]
+test = false
+
 [package.metadata.docs.rs]
 targets = ["wasm32-unknown-unknown"]
 
