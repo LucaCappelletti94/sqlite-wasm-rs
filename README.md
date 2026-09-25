@@ -75,6 +75,8 @@ cargo +nightly build --target wasm32-unknown-unknown -Z build-std=panic_abort,st
 * An OPFS `sahpool` stays with the worker that installed it, and other workers get `SQLITE_MISUSE`.
 * A worker terminated inside a SQLite call leaves its mutexes locked.
 
+Scaling measurements across Chrome, Firefox, WebKit, Node and Bun are in [BENCHMARKS.md](./BENCHMARKS.md).
+
 ## Use without wasm-bindgen
 
 No features are enabled by default, provide your own host functions. See [JS Host](./examples/host-js) or [C Host](./examples/host-c) example.

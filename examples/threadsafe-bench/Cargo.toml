@@ -1,0 +1,31 @@
+[package]
+name = "threadsafe-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# A separate workspace keeps the shared-memory build flags away from the other crates.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+sqlite-wasm-rs = { path = "../..", features = ["wasm-bindgen"] }
+sqlite-wasm-vfs = { path = "../../crates/sqlite-wasm-vfs", features = ["sahpool"] }
+wasm-bindgen = "0.2.128"
+wasm-bindgen-futures = "0.4.78"
+js-sys = "0.3.105"
+
+[features]
+threadsafe = ["sqlite-wasm-rs/threadsafe"]
+sqlite3mc = ["sqlite-wasm-rs/sqlite3mc"]
+# Experiment: per-thread caches of small blocks in front of std's globally locked allocator.
+thread-cache-alloc = []
+
+[profile.release]
+codegen-units = 1
+
+[patch.crates-io]
+rsqlite-vfs = { path = "../../crates/rsqlite-vfs" }
+sqlite-wasm-rs = { path = "../.." }

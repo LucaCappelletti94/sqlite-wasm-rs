@@ -64,7 +64,7 @@ targets = ["wasm32-unknown-unknown"]
 
 [workspace]
 resolver = "2"
-exclude = ["examples/host-js", "examples/host-c"]
+exclude = ["examples/host-js", "examples/host-c", "examples/threadsafe-bench"]
 members = [
   "crates/rsqlite-vfs",
   "crates/sqlite-wasm-libc",
