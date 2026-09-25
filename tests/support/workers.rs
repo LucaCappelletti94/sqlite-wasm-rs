@@ -67,21 +67,6 @@ pub fn task(work: impl FnOnce() + Send + 'static) -> Task {
     })
 }
 
-/// A task whose future runs on the worker's own event loop, for work that awaits browser APIs.
-pub fn async_task<F>(work: impl FnOnce() -> F + Send + 'static) -> Task
-where
-    F: std::future::Future<Output = ()> + 'static,
-{
-    Box::new(move || {
-        let work = work();
-        wasm_bindgen_futures::future_to_promise(async move {
-            work.await;
-            Ok(JsValue::UNDEFINED)
-        })
-        .into()
-    })
-}
-
 /// Worker entry point: runs the boxed task whose address the spawner sent.
 #[wasm_bindgen]
 pub fn run_test_worker_task(task: usize) -> JsValue {

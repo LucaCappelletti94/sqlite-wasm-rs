@@ -53,11 +53,13 @@ fn concurrent_increments_lose_no_update() {
     const INCREMENTS: usize = 200;
 
     install();
-    let setup = scenarios::create_counter("increments.db");
+    let setup = scenarios::create_counter("increments.db", &|_| {});
     let line = scenarios::StartLine::new(THREADS);
     std::thread::scope(|scope| {
         for _ in 0..THREADS {
-            scope.spawn(|| scenarios::increment("increments.db", INCREMENTS, &|| line.wait()));
+            scope.spawn(|| {
+                scenarios::increment("increments.db", INCREMENTS, &|_| {}, &|| line.wait())
+            });
         }
     });
     scenarios::assert_counter(&setup, THREADS * INCREMENTS);
@@ -71,7 +73,7 @@ fn readers_see_only_committed_states() {
     const PAIRS: usize = 250;
 
     install();
-    let setup = scenarios::create_pairs("snapshots.db");
+    let setup = scenarios::create_pairs("snapshots.db", &|_| {});
     let line = scenarios::StartLine::new(WRITERS + READERS);
     let writers_done = AtomicUsize::new(0);
     let start = || line.wait();
@@ -80,14 +82,14 @@ fn readers_see_only_committed_states() {
             let (start, writers_done) = (&start, &writers_done);
             scope.spawn(move || {
                 let _done = Finished(writers_done);
-                scenarios::write_pairs("snapshots.db", writer, PAIRS, start);
+                scenarios::write_pairs("snapshots.db", writer, PAIRS, &|_| {}, start);
             });
         }
         for _ in 0..READERS {
             let (start, writers_done) = (&start, &writers_done);
             scope.spawn(move || {
                 let done = || writers_done.load(Ordering::Acquire) == WRITERS;
-                scenarios::read_pairs("snapshots.db", &done, start);
+                scenarios::read_pairs("snapshots.db", &done, &|_| {}, start);
             });
         }
     });

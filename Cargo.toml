@@ -63,6 +63,10 @@ required-features = ["wasm-bindgen", "threadsafe"]
 name = "threadsafe_main_thread"
 required-features = ["wasm-bindgen", "threadsafe"]
 
+[[test]]
+name = "threadsafe_sqlcipher"
+required-features = ["wasm-bindgen", "threadsafe", "sqlcipher"]
+
 [package.metadata.docs.rs]
 targets = ["wasm32-unknown-unknown"]
 

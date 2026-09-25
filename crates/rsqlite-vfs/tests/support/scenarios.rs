@@ -98,16 +98,18 @@ impl Drop for Connection {
     }
 }
 
-/// Creates a one-row counter at zero.
-pub fn create_counter(name: &str) -> Connection {
+/// Creates a one-row counter at zero, after running `prepare` on the new connection.
+pub fn create_counter(name: &str, prepare: &dyn Fn(&Connection)) -> Connection {
     let connection = Connection::open(name);
+    prepare(&connection);
     connection.exec("CREATE TABLE counter(n INTEGER NOT NULL); INSERT INTO counter VALUES (0);");
     connection
 }
 
-/// Opens its own connection, waits for `start`, then adds one to the counter `times` times.
-pub fn increment(name: &str, times: usize, start: &dyn Fn()) {
+/// Opens its own connection, runs `prepare` on it, waits for `start`, then adds one to the counter `times` times.
+pub fn increment(name: &str, times: usize, prepare: &dyn Fn(&Connection), start: &dyn Fn()) {
     let connection = Connection::open(name);
+    prepare(&connection);
     start();
     for _ in 0..times {
         connection.exec("BEGIN IMMEDIATE; UPDATE counter SET n = n + 1; COMMIT;");
@@ -121,15 +123,23 @@ pub fn assert_counter(connection: &Connection, expected: usize) {
     connection.assert_integrity();
 }
 
-pub fn create_pairs(name: &str) -> Connection {
+pub fn create_pairs(name: &str, prepare: &dyn Fn(&Connection)) -> Connection {
     let connection = Connection::open(name);
+    prepare(&connection);
     connection.exec("CREATE TABLE t(k INTEGER PRIMARY KEY, v INTEGER NOT NULL);");
     connection
 }
 
 /// Inserts `pairs` pairs of rows `(k, k)` and `(-k, -k)`, one pair per transaction.
-pub fn write_pairs(name: &str, writer: usize, pairs: usize, start: &dyn Fn()) {
+pub fn write_pairs(
+    name: &str,
+    writer: usize,
+    pairs: usize,
+    prepare: &dyn Fn(&Connection),
+    start: &dyn Fn(),
+) {
     let connection = Connection::open(name);
+    prepare(&connection);
     start();
     for pair in 0..pairs {
         let key = i64::try_from(1 + writer * pairs + pair).unwrap();
@@ -143,8 +153,14 @@ pub fn write_pairs(name: &str, writer: usize, pairs: usize, start: &dyn Fn()) {
 }
 
 /// Reads count and sum until `done` holds, checking every snapshot is committed and monotonic.
-pub fn read_pairs(name: &str, done: &dyn Fn() -> bool, start: &dyn Fn()) -> usize {
+pub fn read_pairs(
+    name: &str,
+    done: &dyn Fn() -> bool,
+    prepare: &dyn Fn(&Connection),
+    start: &dyn Fn(),
+) -> usize {
     let connection = Connection::open(name);
+    prepare(&connection);
     start();
     let mut last_count = 0;
     let mut reads = 0;
