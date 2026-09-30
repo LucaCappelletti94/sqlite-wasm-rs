@@ -118,7 +118,7 @@ jobs:
       run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
     - name: Test shared-memory host adapter
       env:
-        CFLAGS_wasm32_unknown_unknown: -matomics
+        CFLAGS_wasm32_unknown_unknown: -matomics -mbulk-memory
         WASM_BINDGEN_USE_BROWSER: 1
         RUSTFLAGS: >-
           -Ctarget-feature=+atomics
