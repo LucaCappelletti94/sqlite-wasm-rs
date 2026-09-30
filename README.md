@@ -72,7 +72,7 @@ No features are enabled by default, provide your own host functions. See [JS Hos
 
 ## Use custom SQLite sources
 
-Point `SQLITE_WASM_RS_SOURCE_DIR` to your `sqlite3.c/.h` files (`sqlite3mc_amalgamation.c/.h` for `sqlite3mc`):
+Point `SQLITE_WASM_RS_SOURCE_DIR` to your `sqlite3.c/.h` files (`sqlite3mc_amalgamation.c/.h` for `sqlite3mc`, a [`sqlcipher-src`](https://crates.io/crates/sqlcipher-src) `sqlcipher` directory for `sqlcipher`):
 
 ```sh
 SQLITE_WASM_RS_SOURCE_DIR=/path/to/sqlite cargo build --target wasm32-unknown-unknown --features bindgen
