@@ -64,9 +64,25 @@ cargo run -p rsqlite-vfs --example implement-a-vfs
 
 ## About multithreading
 
-Multithreading is not supported, SQLite is compiled with `-DSQLITE_THREADSAFE=0`.
+By default every SQLite call must stay on one thread. SQLite is compiled with `-DSQLITE_THREADSAFE=0`, or for `sqlcipher` with `-DSQLITE_THREADSAFE=1` and no-op mutexes.
 
 For shared-memory builds, set `CFLAGS_wasm32_unknown_unknown="-matomics -mbulk-memory"`.
+
+The `threadsafe` feature compiles SQLite with `-DSQLITE_THREADSAFE=1` and a mutex built on Wasm atomics, and makes the memory VFS shareable between workers. Workers that share one module and its memory need a nightly shared-memory build:
+
+```sh
+CFLAGS_wasm32_unknown_unknown="-matomics -mbulk-memory" \
+RUSTFLAGS="-Ctarget-feature=+atomics -Clink-args=--shared-memory -Clink-args=--import-memory \
+  -Clink-args=--max-memory=1073741824 -Clink-args=--export=__wasm_init_tls -Clink-args=--export=__tls_size \
+  -Clink-args=--export=__tls_align -Clink-args=--export=__tls_base -Clink-args=--export=__heap_base" \
+cargo +nightly build --target wasm32-unknown-unknown -Z build-std=panic_abort,std --features wasm-bindgen,threadsafe
+```
+
+* In browsers, serve the page with `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp`, so `crossOriginIsolated` is true. Without them, handing the shared memory to a worker fails with a `DataCloneError`. Node and Bun need no headers.
+* Make the first SQLite call on one thread before other workers use SQLite.
+* The browser main thread never waits. Mutexes spin there and `sqlite3_sleep` returns at once.
+* An OPFS `sahpool` works only from the worker that installed it.
+* A worker terminated inside a SQLite call leaves its mutexes locked.
 
 ## Use without wasm-bindgen
 

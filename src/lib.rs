@@ -1,8 +1,8 @@
 #![doc = include_str!("../README.md")]
 #![no_std]
 #![cfg_attr(
-    all(feature = "wasm-bindgen", target_feature = "atomics"),
-    feature(stdarch_wasm_atomic_wait)
+    all(feature = "threadsafe", target_feature = "atomics"),
+    feature(stdarch_wasm_atomic_wait, thread_local)
 )]
 #![allow(clippy::missing_safety_doc)]
 #![allow(non_upper_case_globals)]
@@ -12,6 +12,8 @@
 extern crate alloc;
 
 pub mod host;
+#[cfg(feature = "threadsafe")]
+mod mutex;
 mod shim;
 #[rustfmt::skip]
 #[allow(clippy::type_complexity)]
