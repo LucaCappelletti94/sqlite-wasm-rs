@@ -1,6 +1,14 @@
 # `sqlite-wasm-rs` Change Log
 --------------------------------------------------------------------------------
 
+## Unreleased
+
+### Breaking changes
+
+* `MemVfsUtil::get` and `memvfs::install` are safe with `threadsafe` or on Wasm without `atomics`. Their unsafe forms are `MemVfsUtil::get_unchecked` and `memvfs::install_unchecked` in every build. Threaded safe access requires SQLite compile-option diagnostics, rejects no-op mutexes with `RegisterVfsError::SingleThreaded`, and rejects builds reporting both `DEBUG` and `MUTEX_NOOP` with `RegisterVfsError::UnverifiedMutexes`.
+
+--------------------------------------------------------------------------------
+
 ## [0.6.1](https://github.com/Spxg/sqlite-wasm-rs/compare/0.6.0...0.6.1)
 
 ### Changed

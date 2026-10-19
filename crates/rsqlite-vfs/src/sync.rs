@@ -4,7 +4,7 @@
 
 #[cfg(not(feature = "threadsafe"))]
 mod imp {
-    use crate::{VfsError, VfsResult};
+    use crate::{RegisterVfsError, VfsError, VfsResult};
     use alloc::rc::Rc;
     use core::cell::{RefCell, RefMut};
 
@@ -40,15 +40,25 @@ mod imp {
             self.0.borrow().clone()
         }
     }
+
+    /// Serializes memvfs installation, which on one thread needs no lock.
+    pub(crate) struct RegistrationGuard;
+
+    impl RegistrationGuard {
+        pub(crate) fn enter() -> Result<Self, RegisterVfsError> {
+            Ok(Self)
+        }
+    }
 }
 
 #[cfg(feature = "threadsafe")]
 mod imp {
     use crate::ffi::{
-        sqlite3_mutex, sqlite3_mutex_alloc, sqlite3_mutex_enter, sqlite3_mutex_free,
-        sqlite3_mutex_leave, SQLITE_MUTEX_FAST,
+        sqlite3_compileoption_used, sqlite3_initialize, sqlite3_mutex, sqlite3_mutex_alloc,
+        sqlite3_mutex_enter, sqlite3_mutex_free, sqlite3_mutex_leave, sqlite3_threadsafe,
+        SQLITE_MUTEX_FAST, SQLITE_MUTEX_STATIC_VFS2, SQLITE_MUTEX_STATIC_VFS3, SQLITE_OK,
     };
-    use crate::{VfsError, VfsErrorCode, VfsResult};
+    use crate::{RegisterVfsError, VfsError, VfsErrorCode, VfsResult};
     use core::cell::{RefCell, UnsafeCell};
     use core::marker::PhantomData;
     use core::ops::{Deref, DerefMut};
@@ -149,6 +159,70 @@ mod imp {
             LAST_ERROR.with(|slot| slot.borrow().clone())
         }
     }
+
+    /// Holds `SQLITE_MUTEX_STATIC_VFS2`, SQLite's static mutex for extension VFSes, to serialize memvfs installation.
+    pub(crate) struct RegistrationGuard {
+        mutex: NonNull<sqlite3_mutex>,
+        // SQLite requires the entering thread to leave the mutex.
+        _not_send: PhantomData<*const ()>,
+    }
+
+    impl RegistrationGuard {
+        /// Initializes before locking to permit recursive installation from `sqlite3_os_init`.
+        pub(crate) fn enter() -> Result<Self, RegisterVfsError> {
+            // SAFETY: initialization has no precondition, and SQLite serializes concurrent calls on its own mutexes.
+            let code = unsafe { sqlite3_initialize() };
+            if code != SQLITE_OK {
+                return Err(RegisterVfsError::RegisterVfs(
+                    VfsErrorCode::from_raw(code).expect("SQLite must return a valid error code"),
+                ));
+            }
+            // SAFETY: initialization set up the mutex subsystem, and static mutexes are never freed.
+            let mutex = NonNull::new(unsafe { sqlite3_mutex_alloc(SQLITE_MUTEX_STATIC_VFS2) })
+                .ok_or(RegisterVfsError::RegisterVfs(VfsErrorCode::NoMemory))?;
+            // SAFETY: `mutex` is a live static mutex, and memvfs never enters it while holding it.
+            unsafe { sqlite3_mutex_enter(mutex.as_ptr()) };
+            Ok(Self {
+                mutex,
+                _not_send: PhantomData,
+            })
+        }
+    }
+
+    impl Drop for RegistrationGuard {
+        fn drop(&mut self) {
+            // SAFETY: this guard is not `Send`, so the thread that entered the mutex in `enter` leaves it once.
+            unsafe { sqlite3_mutex_leave(self.mutex.as_ptr()) };
+        }
+    }
+
+    /// Rejects disabled, no-op or unverifiable mutex implementations.
+    pub(crate) fn ensure_real_mutexes() -> Result<(), RegisterVfsError> {
+        // SAFETY: these queries read immutable SQLite build settings.
+        unsafe {
+            if sqlite3_threadsafe() == 0 {
+                return Err(RegisterVfsError::SingleThreaded);
+            }
+            if sqlite3_compileoption_used(c"MUTEX_NOOP".as_ptr()) != 0
+                && sqlite3_compileoption_used(c"DEBUG".as_ptr()) != 0
+            {
+                return Err(RegisterVfsError::UnverifiedMutexes);
+            }
+        }
+        // Release no-op mutexes share one dummy, including the OS_OTHER fallback.
+        // SAFETY: static mutex allocation initializes the subsystem and never frees its mutexes.
+        let distinct = unsafe {
+            let first = sqlite3_mutex_alloc(SQLITE_MUTEX_STATIC_VFS2);
+            !first.is_null() && first != sqlite3_mutex_alloc(SQLITE_MUTEX_STATIC_VFS3)
+        };
+        if distinct {
+            Ok(())
+        } else {
+            Err(RegisterVfsError::SingleThreaded)
+        }
+    }
 }
 
-pub(crate) use imp::{LastError, Locked, Shared};
+#[cfg(feature = "threadsafe")]
+pub(crate) use imp::ensure_real_mutexes;
+pub(crate) use imp::{LastError, Locked, RegistrationGuard, Shared};

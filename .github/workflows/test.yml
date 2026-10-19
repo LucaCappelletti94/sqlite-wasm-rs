@@ -204,5 +204,9 @@ jobs:
       run: |
         cargo test -p rsqlite-vfs
         cargo test -p rsqlite-vfs --features threadsafe
+    - name: Reject SQLite no-op mutex builds
+      run: |
+        LIBSQLITE3_FLAGS="-DSQLITE_MUTEX_NOOP" cargo test -p rsqlite-vfs --features threadsafe --test memvfs_mutexes
+        LIBSQLITE3_FLAGS="-DSQLITE_MUTEX_NOOP -DSQLITE_DEBUG" cargo test -p rsqlite-vfs --features threadsafe --test memvfs_mutexes
     - name: Test implement-a-vfs example
       run: cargo run -p rsqlite-vfs --example implement-a-vfs

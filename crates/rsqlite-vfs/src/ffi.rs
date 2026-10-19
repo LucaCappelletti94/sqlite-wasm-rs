@@ -781,4 +781,10 @@ extern "C" {
     pub fn sqlite3_mutex_enter(arg1: *mut sqlite3_mutex);
 
     pub fn sqlite3_mutex_leave(arg1: *mut sqlite3_mutex);
+
+    pub fn sqlite3_initialize() -> ::core::ffi::c_int;
+
+    pub fn sqlite3_threadsafe() -> ::core::ffi::c_int;
+
+    pub fn sqlite3_compileoption_used(zOptName: *const ::core::ffi::c_char) -> ::core::ffi::c_int;
 }

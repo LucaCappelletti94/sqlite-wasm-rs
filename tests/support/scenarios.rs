@@ -16,7 +16,7 @@ use std::sync::{Arc, Barrier, Once};
 
 use crate::workers;
 
-/// Initializes SQLite on the calling thread, since concurrent first initialization is unsupported.
+/// Initializes SQLite once, on the calling thread, before the scenario's workers start.
 pub fn init() {
     static INIT: Once = Once::new();
     // SAFETY: initialization has no precondition.

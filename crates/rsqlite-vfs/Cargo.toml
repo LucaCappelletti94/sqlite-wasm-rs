@@ -15,7 +15,7 @@ categories = ["development-tools::ffi", "wasm", "database"]
 thiserror = { version = "2.0.20", default-features = false }
 
 [features]
-# Shares memvfs between threads through SQLite's mutexes, so SQLite needs SQLITE_THREADSAFE > 0.
+# Shares memvfs through SQLite's mutexes, requiring SQLITE_THREADSAFE > 0 and compile-option diagnostics.
 threadsafe = []
 
 [dev-dependencies]

@@ -63,8 +63,7 @@ async fn every_worker_draws_its_own_entropy() {
     })
     .await;
 
-    // SAFETY: SQLite's initialization installed memvfs, and no connection is open.
-    let util = unsafe { MemVfsUtil::get() }.unwrap();
+    let util = MemVfsUtil::get().unwrap();
     let mut salts: Vec<Vec<u8>> = (0..WORKERS)
         .map(|worker| util.export_db(&format!("entropy-{worker}.db")).unwrap()[..16].to_vec())
         .collect();

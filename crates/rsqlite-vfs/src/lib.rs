@@ -370,6 +370,10 @@ pub enum RegisterVfsError {
     UnregisterVfs(VfsErrorCode),
     #[error("VFS name is already registered: {0:?}")]
     NameConflict(String),
+    #[error("SQLite has no mutexes, so the VFS cannot be shared between threads")]
+    SingleThreaded,
+    #[error("SQLite's debug no-op mutex configuration cannot be verified for safe access")]
+    UnverifiedMutexes,
 }
 
 /// Looks up a VFS without retaining it. May initialize SQLite.
