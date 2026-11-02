@@ -20,6 +20,32 @@ sahpool = [
   "dep:thiserror",
   "dep:web-sys",
 ]
+jspi-idb = [
+  "dep:rsqlite-vfs",
+  "dep:wasm-bindgen",
+  "dep:js-sys",
+  "dep:thiserror",
+  "dep:web-sys",
+  "web-sys/AbortSignal",
+  "web-sys/Event",
+  "web-sys/IdbDatabase",
+  "web-sys/IdbFactory",
+  "web-sys/IdbKeyRange",
+  "web-sys/IdbObjectStore",
+  "web-sys/IdbOpenDbRequest",
+  "web-sys/IdbRequest",
+  "web-sys/IdbTransaction",
+  "web-sys/IdbTransactionDurability",
+  "web-sys/IdbTransactionMode",
+  "web-sys/IdbTransactionOptions",
+  "web-sys/DomException",
+  "web-sys/DomStringList",
+  "web-sys/LockInfo",
+  "web-sys/LockManager",
+  "web-sys/LockManagerSnapshot",
+  "web-sys/LockMode",
+  "web-sys/LockOptions",
+]
 
 [dependencies]
 rsqlite-vfs = { version = "0.2", optional = true }
@@ -51,3 +77,7 @@ required-features = ["sahpool"]
 [package.metadata.docs.rs]
 all-features = true
 targets = ["wasm32-unknown-unknown"]
+
+[[test]]
+name = "jspi_idb"
+required-features = ["jspi-idb"]

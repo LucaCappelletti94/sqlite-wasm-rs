@@ -188,9 +188,17 @@ jobs:
         rustup target add wasm32-unknown-unknown
         cargo check -p sqlite-wasm-vfs --lib --target wasm32-unknown-unknown --no-default-features
         cargo check -p sqlite-wasm-vfs --lib --target wasm32-unknown-unknown --features sahpool
+        cargo check -p sqlite-wasm-vfs --lib --target wasm32-unknown-unknown --features jspi-idb
     - name: Test SAH pool in a dedicated worker
       working-directory: crates/sqlite-wasm-vfs
       run: wasm-pack test --chrome --headless --features sahpool
+    - name: Test JSPI IndexedDB VFS in Chrome and Firefox
+      working-directory: crates/sqlite-wasm-vfs
+      env:
+        WASM_BINDGEN_TEST_TIMEOUT: 120
+      run: |
+        wasm-pack test --chrome --headless --features jspi-idb --test jspi_idb
+        wasm-pack test --firefox --headless --features jspi-idb --test jspi_idb
 
   test_vfs_native:
     runs-on: ubuntu-latest

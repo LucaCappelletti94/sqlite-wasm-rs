@@ -53,6 +53,7 @@ The following vfs have been implemented:
 
 * [`memory`](./crates/rsqlite-vfs/src/memvfs.rs): as the default vfs, no additional conditions are required, store the database in memory.
 * [`sahpool`](./crates/sqlite-wasm-vfs/src/sahpool.rs): ported from sqlite-wasm, store the database in opfs.
+* [`jspi-idb`](./crates/sqlite-wasm-vfs/src/jspi_idb/mod.rs): store the database in IndexedDB, durable once a commit returns. Needs JSPI (Chrome 137, Firefox 153) and works where OPFS is refused, such as Firefox private windows.
 
 ### How to implement a VFS
 

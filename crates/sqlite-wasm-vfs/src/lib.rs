@@ -1,6 +1,7 @@
 //! SQLite VFS implementations for `wasm32-unknown-unknown`.
 //!
-//! Enable the `sahpool` feature for the OPFS sync access handle pool VFS.
+//! Enable the `sahpool` feature for the OPFS sync access handle pool VFS, and
+//! `jspi-idb` for the durable IndexedDB VFS on engines with JSPI.
 
 #![allow(non_upper_case_globals)]
 #![allow(non_camel_case_types)]
@@ -9,6 +10,9 @@
 /// Origin Private File System (OPFS) VFS implementation using `SyncAccessHandle`.
 #[cfg(feature = "sahpool")]
 pub mod sahpool;
+
+#[cfg(feature = "jspi-idb")]
+pub mod jspi_idb;
 
 #[cfg(test)]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
