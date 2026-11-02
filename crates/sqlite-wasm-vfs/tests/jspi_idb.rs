@@ -347,17 +347,23 @@ async fn wal_needs_exclusive_locking() {
 }
 
 #[wasm_bindgen_test]
-async fn connections_take_turns() {
+async fn connections_in_one_context_follow_sqlite_locking() {
     vfs("locks").await;
     in_run(|| {
         let writer = Db::open("locks", "app.db").unwrap();
         let reader = Db::open("locks", "app.db").unwrap();
         writer.ok("CREATE TABLE t(x)");
 
-        // One connection holds the whole database until its transaction ends.
         writer.ok("BEGIN IMMEDIATE");
-        assert_eq!(reader.exec("SELECT count(*) FROM t"), SQLITE_BUSY);
+        assert_eq!(reader.exec("BEGIN IMMEDIATE"), SQLITE_BUSY);
+        assert_eq!(reader.text("SELECT count(*) FROM t"), "0");
         writer.ok("INSERT INTO t VALUES (1)");
+
+        // A reader holding SHARED keeps the writer from committing.
+        reader.ok("BEGIN");
+        assert_eq!(reader.text("SELECT count(*) FROM t"), "0");
+        assert_eq!(writer.exec("COMMIT"), SQLITE_BUSY);
+        reader.ok("COMMIT");
         writer.ok("COMMIT");
         assert_eq!(reader.text("SELECT count(*) FROM t"), "1");
     })

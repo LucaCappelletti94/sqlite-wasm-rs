@@ -18,6 +18,25 @@ extern "C" {
         options: &Object,
         callback: &Function,
     ) -> Result<Promise, JsValue>;
+
+    #[wasm_bindgen(method, catch)]
+    fn query(this: &LockManager) -> Result<Promise, JsValue>;
+}
+
+/// Lock mode, as the Web Locks API names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LockMode {
+    Shared,
+    Exclusive,
+}
+
+impl LockMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Shared => "shared",
+            Self::Exclusive => "exclusive",
+        }
+    }
 }
 
 /// A granted Web Lock, released on drop.
@@ -34,10 +53,23 @@ impl Drop for HeldLock {
 
 /// Why a lock was not granted.
 pub(crate) enum LockError {
-    /// Another holder kept it past the bound.
+    /// Another holder kept it past the bound, or held it for `IfAvailable`.
     Busy,
     /// The Web Locks API failed.
     Js(JsValue),
+}
+
+/// How long to wait for the lock.
+#[derive(Clone, Copy)]
+pub(crate) enum Wait {
+    /// Fail at once when the lock is held.
+    IfAvailable,
+    /// Wait at most this long.
+    Bounded(Duration),
+}
+
+fn set(object: &Object, key: &str, value: &JsValue) {
+    Reflect::set(object, &key.into(), value).expect("setting a property of a plain object");
 }
 
 fn abort_after(bound: Duration) -> Result<JsValue, JsValue> {
@@ -47,11 +79,12 @@ fn abort_after(bound: Duration) -> Result<JsValue, JsValue> {
     timeout.call1(&abort_signal, &millis.into())
 }
 
-/// Requests `name` exclusively, suspending at most `bound` until it is granted.
+/// Requests `name` in `mode`, suspending until it is granted or refused.
 pub(crate) fn acquire(
     locks: &LockManager,
     name: &str,
-    bound: Duration,
+    mode: LockMode,
+    wait: Wait,
 ) -> Result<HeldLock, LockError> {
     let mut release = None;
     let held = Promise::new(&mut |resolve, _reject| release = Some(resolve));
@@ -61,7 +94,7 @@ pub(crate) fn acquire(
     let grant = Promise::new(&mut |resolve, _reject| granted = Some(resolve));
     let granted = granted.expect("Promise executors run synchronously");
 
-    // Called once the lock is granted. The lock lasts until `held` settles.
+    // Called once, with the lock or with null when `ifAvailable` finds it held.
     let callback = Closure::<dyn FnMut(JsValue) -> JsValue>::new({
         let held = held.clone();
         move |lock: JsValue| {
@@ -71,16 +104,27 @@ pub(crate) fn acquire(
     });
 
     let options = Object::new();
-    let signal = abort_after(bound).map_err(LockError::Js)?;
-    Reflect::set(&options, &"signal".into(), &signal).map_err(LockError::Js)?;
+    set(&options, "mode", &mode.as_str().into());
+    let bound = match wait {
+        Wait::IfAvailable => {
+            set(&options, "ifAvailable", &JsValue::TRUE);
+            // Bounds only a browser that never answers.
+            Duration::from_secs(60)
+        }
+        Wait::Bounded(bound) => {
+            set(
+                &options,
+                "signal",
+                &abort_after(bound).map_err(LockError::Js)?,
+            );
+            // Bounds only a browser that never delivers the abort.
+            bound + Duration::from_secs(1)
+        }
+    };
     let request = locks
         .request(name, &options, callback.as_ref().unchecked_ref())
         .map_err(LockError::Js)?;
-    // The extra second bounds only a browser that never delivers the abort.
-    let outcome = context::wait(
-        &Promise::race(&Array::of2(&grant, &request)),
-        bound + Duration::from_secs(1),
-    );
+    let outcome = context::wait(&Promise::race(&Array::of2(&grant, &request)), bound);
 
     let refused = |error| {
         // Releases a lock the browser grants after we stop waiting.
@@ -88,6 +132,7 @@ pub(crate) fn acquire(
         Err(error)
     };
     let result = match outcome {
+        Ok(lock) if lock.is_null() => refused(LockError::Busy),
         Ok(_) => Ok(HeldLock {
             release: release.clone(),
         }),
@@ -109,4 +154,22 @@ pub(crate) fn acquire(
         .unchecked_into::<Function>();
     let _ = then.call2(&request, &keep_alive, &keep_alive);
     result
+}
+
+/// Returns whether any context holds `name`.
+pub(crate) fn is_held(locks: &LockManager, name: &str, bound: Duration) -> Result<bool, JsValue> {
+    let snapshot = match context::wait(&locks.query()?, bound) {
+        Ok(snapshot) => snapshot,
+        Err(WaitError::Rejected(reason)) => return Err(reason),
+        Err(WaitError::TimedOut) => {
+            return Err(JsValue::from_str("navigator.locks.query timed out"))
+        }
+    };
+    let held = Reflect::get(&snapshot, &"held".into())?;
+    Ok(Array::from(&held).iter().any(|info| {
+        Reflect::get(&info, &"name".into())
+            .ok()
+            .and_then(|lock| lock.as_string())
+            .is_some_and(|lock| lock == name)
+    }))
 }

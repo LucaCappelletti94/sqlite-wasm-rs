@@ -5,7 +5,7 @@ use super::{
     context,
     idb::{Durability, Meta, MAX_SAFE_INTEGER},
     js_vfs_error,
-    lock::{self, HeldLock, LockError},
+    lock::{self, HeldLock, LockError, LockMode, Wait},
     Inner, BLOCK_SIZE,
 };
 use js_sys::Uint8Array;
@@ -73,8 +73,11 @@ pub(crate) struct FileState {
     /// Size when the open atomic write batch began.
     batch: Option<u64>,
     pub(crate) handles: usize,
-    /// A handle of this context holds the database lock.
-    locked: bool,
+    /// Handles of this context holding the access lock.
+    access_holders: usize,
+    reserved_held: bool,
+    /// A handle of this context holds or awaits exclusive access.
+    exclusive_pending: bool,
 }
 
 impl FileState {
@@ -89,7 +92,9 @@ impl FileState {
             truncate_floor: None,
             batch: None,
             handles: 0,
-            locked: false,
+            access_holders: 0,
+            reserved_held: false,
+            exclusive_pending: false,
         }
     }
 
@@ -151,8 +156,8 @@ pub(crate) struct IdbFile {
     pub(crate) state: Rc<RefCell<FileState>>,
     pub(crate) read_only: bool,
     level: LockLevel,
-    /// The database lock, held at every level above NONE.
-    lock: Option<HeldLock>,
+    access: Option<(HeldLock, LockMode)>,
+    reserved: Option<HeldLock>,
 }
 
 impl IdbFile {
@@ -162,7 +167,8 @@ impl IdbFile {
             state,
             read_only,
             level: LockLevel::None,
-            lock: None,
+            access: None,
+            reserved: None,
         }
     }
 
@@ -285,31 +291,106 @@ impl IdbFile {
         }
     }
 
-    /// Takes the database lock, which keeps every other connection out.
-    fn lock_database(&mut self) -> VfsResult<()> {
-        if self.state.borrow().locked {
-            return Err(VfsError::new(
-                VfsErrorCode::Busy,
-                "database is locked in this context".into(),
-            ));
+    fn acquire(&self, kind: &str, mode: LockMode, wait: Wait) -> VfsResult<HeldLock> {
+        let name = format!("{}/{}/{kind}", self.inner.lock_prefix, self.name());
+        lock::acquire(&self.inner.locks, &name, mode, wait).map_err(|err| match err {
+            LockError::Busy => VfsError::new(VfsErrorCode::Busy, "database is locked".into()),
+            LockError::Js(err) => js_vfs_error(VfsErrorCode::IoLock, "request a Web Lock", err),
+        })
+    }
+
+    fn busy() -> VfsError {
+        VfsError::new(
+            VfsErrorCode::Busy,
+            "database is locked in this context".into(),
+        )
+    }
+
+    fn lock_shared(&mut self) -> VfsResult<()> {
+        if self.state.borrow().exclusive_pending {
+            return Err(Self::busy());
         }
-        let name = format!("{}/{}", self.inner.lock_prefix, self.name());
-        let held =
-            lock::acquire(&self.inner.locks, &name, self.inner.lock_timeout).map_err(|err| {
-                match err {
-                    LockError::Busy => {
-                        VfsError::new(VfsErrorCode::Busy, "database is locked".into())
-                    }
-                    LockError::Js(err) => {
-                        js_vfs_error(VfsErrorCode::IoLock, "request a Web Lock", err)
-                    }
-                }
-            })?;
-        // Dropping `held` on failure releases the lock.
-        self.revalidate()?;
-        self.state.borrow_mut().locked = true;
-        self.lock = Some(held);
+        let held = self.acquire(
+            "access",
+            LockMode::Shared,
+            Wait::Bounded(self.inner.lock_timeout),
+        )?;
+        // A reader in this context already keeps writers of other contexts out.
+        if self.state.borrow().access_holders == 0 {
+            self.revalidate()?;
+        }
+        self.state.borrow_mut().access_holders += 1;
+        self.access = Some((held, LockMode::Shared));
+        self.level = LockLevel::Shared;
         Ok(())
+    }
+
+    fn lock_reserved(&mut self) -> VfsResult<()> {
+        if self.reserved.is_some() {
+            return Ok(());
+        }
+        if self.state.borrow().reserved_held {
+            return Err(Self::busy());
+        }
+        let held = self.acquire("reserved", LockMode::Exclusive, Wait::IfAvailable)?;
+        self.state.borrow_mut().reserved_held = true;
+        self.reserved = Some(held);
+        Ok(())
+    }
+
+    /// Trades the shared access lock for the exclusive one, holding `reserved`.
+    fn lock_exclusive(&mut self) -> VfsResult<()> {
+        if matches!(self.access, Some((_, LockMode::Exclusive))) {
+            return Ok(());
+        }
+        self.level = LockLevel::Pending;
+        {
+            let mut state = self.state.borrow_mut();
+            state.exclusive_pending = true;
+            if state.access_holders > usize::from(self.access.is_some()) {
+                return Err(Self::busy());
+            }
+        }
+        // Only the reserved holder requests exclusive access, so only readers contend here.
+        let had_access = self.access.take().is_some();
+        let timeout = Wait::Bounded(self.inner.lock_timeout);
+        let (outcome, held) = match self.acquire("access", LockMode::Exclusive, timeout) {
+            Ok(held) => (Ok(()), Some((held, LockMode::Exclusive))),
+            // Back to PENDING with a shared lock, which no writer contests.
+            Err(err) => match self.acquire("access", LockMode::Shared, timeout) {
+                Ok(held) => (Err(err), Some((held, LockMode::Shared))),
+                Err(_) => (Err(err), None),
+            },
+        };
+        if !had_access && held.is_some() && self.state.borrow().access_holders == 0 {
+            // Dropping `held` on failure releases the regained lock.
+            self.revalidate()?;
+        }
+        match (had_access, held.is_some()) {
+            (false, true) => self.state.borrow_mut().access_holders += 1,
+            (true, false) => self.dec_access_holders(),
+            _ => {}
+        }
+        self.access = held;
+        outcome
+    }
+
+    fn dec_access_holders(&self) {
+        self.state.borrow_mut().access_holders -= 1;
+    }
+
+    fn release_reserved(&mut self) {
+        if self.reserved.take().is_some() {
+            let mut state = self.state.borrow_mut();
+            state.reserved_held = false;
+            state.exclusive_pending = false;
+        }
+    }
+
+    fn release_access(&mut self) {
+        if self.access.take().is_some() {
+            self.dec_access_holders();
+        }
     }
 }
 
@@ -424,14 +505,22 @@ impl VfsFile for IdbFile {
             self.level = level;
             return Ok(());
         }
-        if level == LockLevel::Pending {
-            return Err(VfsError::new(
-                VfsErrorCode::IoLock,
-                "PENDING cannot be requested".into(),
-            ));
+        if self.level == LockLevel::None {
+            self.lock_shared()?;
         }
-        if self.lock.is_none() {
-            self.lock_database()?;
+        match level {
+            LockLevel::None | LockLevel::Shared => {}
+            LockLevel::Reserved => self.lock_reserved()?,
+            LockLevel::Exclusive => {
+                self.lock_reserved()?;
+                self.lock_exclusive()?;
+            }
+            LockLevel::Pending => {
+                return Err(VfsError::new(
+                    VfsErrorCode::IoLock,
+                    "PENDING cannot be requested".into(),
+                ))
+            }
         }
         self.level = level;
         Ok(())
@@ -451,10 +540,21 @@ impl VfsFile for IdbFile {
             self.state.borrow_mut().reset(Some(durable));
         }
 
-        if level == LockLevel::None || result.is_err() {
-            if self.lock.take().is_some() {
-                self.state.borrow_mut().locked = false;
+        let exclusive = matches!(self.access, Some((_, LockMode::Exclusive)));
+        if level == LockLevel::Shared && exclusive && result.is_ok() {
+            self.release_access();
+            let timeout = Wait::Bounded(self.inner.lock_timeout);
+            match self.acquire("access", LockMode::Shared, timeout) {
+                Ok(held) => {
+                    self.state.borrow_mut().access_holders += 1;
+                    self.access = Some((held, LockMode::Shared));
+                }
+                Err(err) => result = Err(err),
             }
+        }
+        self.release_reserved();
+        if level == LockLevel::None || result.is_err() {
+            self.release_access();
             self.level = LockLevel::None;
         } else {
             self.level = LockLevel::Shared;
@@ -462,9 +562,17 @@ impl VfsFile for IdbFile {
         result
     }
 
-    /// No other connection can hold a lock while this one holds the database lock.
     fn check_reserved_lock(&self) -> VfsResult<bool> {
         context::check_entry()?;
-        Ok(self.level >= LockLevel::Reserved)
+        let state = self.state.borrow();
+        if state.ephemeral {
+            return Ok(false);
+        }
+        if self.reserved.is_some() || state.reserved_held {
+            return Ok(true);
+        }
+        let name = format!("{}/{}/reserved", self.inner.lock_prefix, state.name);
+        lock::is_held(&self.inner.locks, &name, self.inner.lock_timeout)
+            .map_err(|err| js_vfs_error(VfsErrorCode::IoCheckReservedLock, "query Web Locks", err))
     }
 }

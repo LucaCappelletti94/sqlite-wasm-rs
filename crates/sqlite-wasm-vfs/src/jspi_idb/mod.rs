@@ -29,8 +29,7 @@
 //! - Files are 4 KiB blocks. Writes stay in memory until a sync, batch commit, unlock or
 //!   close stores them in one IndexedDB transaction, which lands whole or not at all.
 //!   SQLite3MC builds have no batch atomic writes, so their commits use the journal.
-//! - Windows and workers take turns on a database. A connection holds one Web Lock
-//!   for its whole transaction, readers included, and waits at most
+//! - Windows and workers share a database through Web Locks, waiting at most
 //!   [`JspiIdbCfgBuilder::lock_timeout`] before `SQLITE_BUSY`. WAL needs
 //!   `PRAGMA locking_mode=EXCLUSIVE`. Web Locks need a secure context.
 
