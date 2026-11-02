@@ -53,6 +53,66 @@ fn size_limit() -> VfsError {
     VfsError::new(VfsErrorCode::Full, "file size limit reached".into())
 }
 
+/// Least recently used clean blocks, bounded by a block count.
+struct BlockCache {
+    capacity: usize,
+    blocks: HashMap<u64, (Box<[u8]>, u64)>,
+    by_use: BTreeMap<u64, u64>,
+    clock: u64,
+}
+
+impl BlockCache {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            blocks: HashMap::new(),
+            by_use: BTreeMap::new(),
+            clock: 0,
+        }
+    }
+
+    fn get(&mut self, index: u64) -> Option<&[u8]> {
+        let (block, used) = self.blocks.get_mut(&index)?;
+        self.by_use.remove(used);
+        self.clock += 1;
+        *used = self.clock;
+        self.by_use.insert(self.clock, index);
+        Some(block)
+    }
+
+    fn insert(&mut self, index: u64, block: Box<[u8]>) {
+        if self.capacity == 0 {
+            return;
+        }
+        self.clock += 1;
+        if let Some((_, used)) = self.blocks.insert(index, (block, self.clock)) {
+            self.by_use.remove(&used);
+        }
+        self.by_use.insert(self.clock, index);
+        while self.blocks.len() > self.capacity {
+            let (_, oldest) = self.by_use.pop_first().expect("every block has a use");
+            self.blocks.remove(&oldest);
+        }
+    }
+
+    /// Drops every block at or past `first`.
+    fn truncate(&mut self, first: u64) {
+        let by_use = &mut self.by_use;
+        self.blocks.retain(|&index, (_, used)| {
+            let keep = index < first;
+            if !keep {
+                by_use.remove(used);
+            }
+            keep
+        });
+    }
+
+    fn clear(&mut self) {
+        self.blocks.clear();
+        self.by_use.clear();
+    }
+}
+
 /// Blocks read from IndexedDB for one call, `None` for blocks never stored.
 type Fetched = HashMap<u64, Option<Box<[u8]>>>;
 
@@ -70,6 +130,7 @@ pub(crate) struct FileState {
     dirty: BTreeMap<u64, Box<[u8]>>,
     /// Smallest size truncated to since the last flush.
     truncate_floor: Option<u64>,
+    cache: BlockCache,
     /// Size when the open atomic write batch began.
     batch: Option<u64>,
     pub(crate) handles: usize,
@@ -81,7 +142,7 @@ pub(crate) struct FileState {
 }
 
 impl FileState {
-    pub(crate) fn new(name: &str, meta: Meta) -> Self {
+    pub(crate) fn new(name: &str, meta: Meta, cache_blocks: usize) -> Self {
         Self {
             name: name.into(),
             ephemeral: false,
@@ -90,6 +151,7 @@ impl FileState {
             durable: meta,
             dirty: BTreeMap::new(),
             truncate_floor: None,
+            cache: BlockCache::new(cache_blocks),
             batch: None,
             handles: 0,
             access_holders: 0,
@@ -103,7 +165,7 @@ impl FileState {
         Self {
             ephemeral: true,
             exists: false,
-            ..Self::new("", Meta::default())
+            ..Self::new("", Meta::default(), 0)
         }
     }
 
@@ -122,6 +184,7 @@ impl FileState {
         self.size = self.durable.size;
         self.dirty.clear();
         self.truncate_floor = None;
+        self.cache.clear();
         self.batch = None;
     }
 
@@ -135,7 +198,9 @@ impl FileState {
     }
 
     fn needs_fetch(&self, index: u64) -> bool {
-        index < self.stored_blocks() && !self.dirty.contains_key(&index)
+        index < self.stored_blocks()
+            && !self.dirty.contains_key(&index)
+            && !self.cache.blocks.contains_key(&index)
     }
 
     fn has_pending(&self) -> bool {
@@ -144,9 +209,19 @@ impl FileState {
 
     /// The dirty copy of block `index`, made from its current contents if needed.
     fn dirty_block(&mut self, fetched: &mut Fetched, index: u64) -> &mut [u8] {
-        self.dirty
-            .entry(index)
-            .or_insert_with(|| fetched.remove(&index).flatten().unwrap_or_else(zero_block))
+        let stored = self.stored_blocks();
+        let cache = &mut self.cache;
+        self.dirty.entry(index).or_insert_with(|| {
+            fetched
+                .remove(&index)
+                .flatten()
+                .or_else(|| {
+                    (index < stored)
+                        .then(|| cache.get(index).map(Box::from))
+                        .flatten()
+                })
+                .unwrap_or_else(zero_block)
+        })
     }
 }
 
@@ -245,24 +320,33 @@ impl IdbFile {
             .map_err(|err| js_vfs_error(code, "write to IndexedDB", err))?;
 
         let mut state = self.state.borrow_mut();
-        state.dirty.clear();
+        let state = &mut *state;
+        for (index, block) in std::mem::take(&mut state.dirty) {
+            state.cache.insert(index, block);
+        }
         state.durable = meta;
         state.truncate_floor = None;
         state.exists = true;
         Ok(())
     }
 
-    /// Reloads the size another context may have changed.
+    /// Reloads size and generation, dropping the cache if another context
+    /// wrote, and records whether the journal and WAL exist.
     fn revalidate(&self) -> VfsResult<()> {
-        let meta = self
+        let name = self.name();
+        let journal = format!("{name}-journal");
+        let wal = format!("{name}-wal");
+        let metas = self
             .inner
             .idb
-            .meta(&self.name())
+            .metas(&[&name, &journal, &wal])
             .map_err(|err| js_vfs_error(VfsErrorCode::IoLock, "read file metadata", err))?;
+        self.inner
+            .hint_sidecars([(journal, metas[1].is_some()), (wal, metas[2].is_some())]);
         let mut state = self.state.borrow_mut();
-        if meta != Some(state.durable) || !state.exists {
+        if metas[0] != Some(state.durable) || !state.exists {
             debug_assert!(!state.has_pending(), "buffered writes without a lock");
-            state.reset(meta);
+            state.reset(metas[0]);
         }
         Ok(())
     }
@@ -376,7 +460,11 @@ impl IdbFile {
     }
 
     fn dec_access_holders(&self) {
-        self.state.borrow_mut().access_holders -= 1;
+        let mut state = self.state.borrow_mut();
+        state.access_holders -= 1;
+        if state.access_holders == 0 {
+            self.inner.forget_sidecars(&state.name);
+        }
     }
 
     fn release_reserved(&mut self) {
@@ -416,17 +504,25 @@ impl VfsFile for IdbFile {
         let end = size.min(offset.saturating_add(len64(buf.len())));
         let fetched = self.prefetch(offset, end, false, VfsErrorCode::IoRead)?;
 
-        let state = self.state.borrow();
+        let mut state = self.state.borrow_mut();
+        let state = &mut *state;
+        let stored = state.stored_blocks();
         let zeros = [0; BLOCK_SIZE];
         let mut copied = 0;
         for index in offset / BLOCK..blocks_for(end) {
             let (from, to) = segment(index, offset, end);
             let block: &[u8] = match (state.dirty.get(&index), fetched.get(&index)) {
                 (Some(block), _) | (None, Some(Some(block))) => block,
+                _ if index < stored => state.cache.get(index).unwrap_or(&zeros),
                 _ => &zeros,
             };
             buf[copied..copied + to - from].copy_from_slice(&block[from..to]);
             copied += to - from;
+        }
+        for (index, block) in fetched {
+            if let Some(block) = block {
+                state.cache.insert(index, block);
+            }
         }
         Ok(copied)
     }
@@ -477,6 +573,7 @@ impl VfsFile for IdbFile {
         }
         let kept = blocks_for(size);
         state.dirty.retain(|&index, _| index < kept);
+        state.cache.truncate(kept);
         state.truncate_floor = Some(state.truncate_floor.map_or(size, |floor| floor.min(size)));
         state.size = size;
         Ok(())

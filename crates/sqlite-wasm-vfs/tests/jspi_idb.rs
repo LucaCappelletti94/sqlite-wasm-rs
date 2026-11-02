@@ -1,6 +1,7 @@
 use js_sys::{futures::JsFuture, Array, Promise};
+use rsqlite_vfs::VfsFilesManager;
 use sqlite_wasm_rs::*;
-use sqlite_wasm_vfs::jspi_idb::{install, run, JspiIdbCfgBuilder};
+use sqlite_wasm_vfs::jspi_idb::{install, run, JspiIdbCfgBuilder, JspiIdbError, JspiIdbUtil};
 use std::{
     ffi::{CStr, CString},
     ptr,
@@ -40,15 +41,20 @@ fn database(vfs: &str) -> String {
 }
 
 /// Installs VFS `name` over a fresh IndexedDB database of its own.
-async fn vfs(name: &str) {
+async fn vfs(name: &str) -> JspiIdbUtil {
+    vfs_with_cache(name, 256).await
+}
+
+async fn vfs_with_cache(name: &str, cache_blocks: usize) -> JspiIdbUtil {
     JsFuture::from(delete_database(&database(name)))
         .await
         .unwrap();
     let cfg = JspiIdbCfgBuilder::new()
         .vfs_name(name)
         .database(&database(name))
+        .cache_blocks(cache_blocks)
         .build();
-    install::<WasmOsCallback>(&cfg, false).await.unwrap();
+    install::<WasmOsCallback>(&cfg, false).await.unwrap()
 }
 
 async fn files(vfs: &str) -> Vec<String> {
@@ -259,7 +265,7 @@ async fn journal_modes_round_trip() {
         .enumerate()
     {
         let name = format!("journal-{index}");
-        vfs(&name).await;
+        vfs_with_cache(&name, 0).await;
         let journal = format!("PRAGMA journal_mode={mode}");
         // A cache smaller than the transaction forces spills and a journal.
         let statements = [
@@ -280,7 +286,7 @@ async fn journal_modes_round_trip() {
 async fn page_sizes_round_trip() {
     for (index, page_size) in [1024, 4096, 65536].into_iter().enumerate() {
         let name = format!("page-{index}");
-        vfs(&name).await;
+        vfs_with_cache(&name, 4).await;
         let pragma = format!("PRAGMA page_size={page_size}");
         let statements = [
             pragma.as_str(),
@@ -296,7 +302,7 @@ async fn page_sizes_round_trip() {
 
 #[wasm_bindgen_test]
 async fn hot_journal_is_rolled_back() {
-    vfs("hot").await;
+    vfs_with_cache("hot", 0).await;
     write(
         "hot",
         &[
@@ -368,4 +374,33 @@ async fn connections_in_one_context_follow_sqlite_locking() {
         assert_eq!(reader.text("SELECT count(*) FROM t"), "1");
     })
     .await;
+}
+
+#[wasm_bindgen_test]
+async fn open_files_cannot_be_removed() {
+    let util = vfs("manage").await;
+    in_run(move || {
+        let db = Db::open("manage", "app.db").unwrap();
+        db.ok("CREATE TABLE t(x)");
+        assert!(matches!(
+            util.remove("app.db"),
+            Err(JspiIdbError::FileInUse(_))
+        ));
+        assert!(matches!(util.clear(), Err(JspiIdbError::FilesInUse)));
+        drop(db);
+        assert!(util.remove("app.db").unwrap());
+        assert!(!util.contains("app.db").unwrap());
+    })
+    .await;
+}
+
+#[wasm_bindgen_test]
+async fn one_vfs_per_indexeddb_database() {
+    let util = vfs("first").await;
+    let second = JspiIdbCfgBuilder::new()
+        .vfs_name("second")
+        .database(util.database())
+        .build();
+    let installed = install::<WasmOsCallback>(&second, false).await;
+    assert!(matches!(installed, Err(JspiIdbError::DatabaseInUse(_))));
 }

@@ -51,9 +51,10 @@ use rsqlite_vfs::{
     },
     register_vfs, AccessMode, FileKind, LockLevel, OpenAccess, OpenOptions, OpenRequest,
     OpenedFile, OsCallback, RegisterVfsError, SQLiteIoMethods, SQLiteVfs, SQLiteVfsFile,
-    VfsAppData, VfsError, VfsErrorCode, VfsFile, VfsResult, VfsStore,
+    VfsAppData, VfsError, VfsErrorCode, VfsFile, VfsFilesManager, VfsResult, VfsStore,
 };
 use std::{
+    any::TypeId,
     cell::RefCell,
     collections::HashMap,
     ffi::{c_int, c_void},
@@ -107,6 +108,12 @@ impl JspiIdbCfgBuilder {
         self
     }
 
+    /// 4 KiB blocks cached per open file, 256 by default. Zero disables the cache.
+    pub fn cache_blocks(mut self, blocks: usize) -> Self {
+        self.0.cache_blocks = blocks;
+        self
+    }
+
     /// Longest wait for a lock before `SQLITE_BUSY`, five seconds by default.
     pub fn lock_timeout(mut self, timeout: Duration) -> Self {
         self.0.lock_timeout = timeout;
@@ -135,6 +142,7 @@ impl Default for JspiIdbCfgBuilder {
 pub struct JspiIdbCfg {
     vfs_name: String,
     database: String,
+    cache_blocks: usize,
     lock_timeout: Duration,
     io_timeout: Duration,
 }
@@ -144,6 +152,7 @@ impl Default for JspiIdbCfg {
         Self {
             vfs_name: "jspi-idb".into(),
             database: "sqlite-wasm-vfs-jspi-idb".into(),
+            cache_blocks: 256,
             lock_timeout: Duration::from_secs(5),
             io_timeout: Duration::from_secs(30),
         }
@@ -175,6 +184,14 @@ pub enum JspiIdbError {
     Timeout(&'static str),
     #[error("invalid configuration: {0}")]
     InvalidConfiguration(&'static str),
+    #[error("VFS {0:?} is already installed with a different configuration or OS callback")]
+    ConfigurationMismatch(String),
+    #[error("IndexedDB database {0:?} is already used by another VFS in this context")]
+    DatabaseInUse(String),
+    #[error("file is in use: {0:?}")]
+    FileInUse(String),
+    #[error("files are open, close all databases first")]
+    FilesInUse,
 }
 
 impl JspiIdbError {
@@ -206,8 +223,10 @@ impl<C: OsCallback> OsCallback for JspiOs<C> {
     }
 }
 
-/// State of one installed VFS, shared by its handles.
+/// State of one installed VFS, shared by its handles and its [`JspiIdbUtil`].
 pub(crate) struct Inner {
+    cfg: JspiIdbCfg,
+    os_type: TypeId,
     os: Box<dyn OsCallback>,
     pub(crate) idb: Idb,
     pub(crate) locks: LockManager,
@@ -216,6 +235,8 @@ pub(crate) struct Inner {
     /// Files open in this context, by name.
     files: RefCell<HashMap<String, Rc<RefCell<FileState>>>>,
     last_error: RefCell<Option<VfsError>>,
+    /// Journal and WAL existence read under a held access lock, dropped with it.
+    sidecars: RefCell<HashMap<String, bool>>,
     /// Closes the connection when another context deletes or upgrades the database.
     _on_version_change: Closure<dyn FnMut(Event)>,
 }
@@ -253,6 +274,7 @@ impl Inner {
                         let created = self.idb.create(name).map_err(|err| {
                             js_vfs_error(VfsErrorCode::CantOpen, "create file", err)
                         })?;
+                        self.sidecars.borrow_mut().remove(name);
                         if created {
                             Meta::default()
                         } else if options.exclusive() {
@@ -267,7 +289,7 @@ impl Inner {
                     state.borrow_mut().reset(Some(meta));
                     state
                 } else {
-                    let state = FileState::new(name, meta);
+                    let state = FileState::new(name, meta, self.cfg.cache_blocks);
                     let state = Rc::new(RefCell::new(state));
                     self.files.borrow_mut().insert(name.into(), state.clone());
                     state
@@ -301,6 +323,21 @@ impl Inner {
         result
     }
 
+    /// Records sidecar existence read while this context holds the access lock.
+    ///
+    /// Until it releases that lock, a sidecar changes only in ways SQLite's
+    /// hot-journal check tolerates: a writer holding the reserved lock creates or
+    /// removes its journal without touching the database.
+    pub(crate) fn hint_sidecars(&self, sidecars: [(String, bool); 2]) {
+        self.sidecars.borrow_mut().extend(sidecars);
+    }
+
+    pub(crate) fn forget_sidecars(&self, db: &str) {
+        let mut sidecars = self.sidecars.borrow_mut();
+        sidecars.remove(&format!("{db}-journal"));
+        sidecars.remove(&format!("{db}-wal"));
+    }
+
     fn exists(&self, name: &str) -> VfsResult<bool> {
         if self
             .files
@@ -310,6 +347,9 @@ impl Inner {
         {
             return Ok(true);
         }
+        if let Some(&exists) = self.sidecars.borrow().get(name) {
+            return Ok(exists);
+        }
         Ok(self.meta(name, VfsErrorCode::IoAccess)?.is_some())
     }
 
@@ -318,6 +358,7 @@ impl Inner {
             .idb
             .delete(name, durability)
             .map_err(|err| js_vfs_error(VfsErrorCode::IoDelete, "delete file", err))?;
+        self.sidecars.borrow_mut().remove(name);
         if let Some(state) = self.files.borrow().get(name) {
             state.borrow_mut().reset(None);
         }
@@ -460,6 +501,69 @@ impl SQLiteVfs<JspiIdbIoMethods> for JspiIdbVfs {
     }
 }
 
+thread_local! {
+    static INSTALLED: RefCell<HashMap<String, Rc<Inner>>> = RefCell::new(HashMap::new());
+}
+
+/// Management handle for one installed VFS. Its [`VfsFilesManager`] methods
+/// use IndexedDB, so call them inside [`run`].
+#[derive(Clone)]
+pub struct JspiIdbUtil {
+    inner: Rc<Inner>,
+}
+
+impl JspiIdbUtil {
+    pub fn vfs_name(&self) -> &str {
+        &self.inner.cfg.vfs_name
+    }
+
+    pub fn database(&self) -> &str {
+        &self.inner.cfg.database
+    }
+}
+
+/// Removal and clearing refuse files open in this context. Close files open in
+/// other contexts first, since they are not detected.
+impl VfsFilesManager for JspiIdbUtil {
+    type Error = JspiIdbError;
+
+    fn remove(&self, filename: &str) -> Result<bool, Self::Error> {
+        context::check_entry()?;
+        if self.inner.files.borrow().contains_key(filename) {
+            return Err(JspiIdbError::FileInUse(filename.into()));
+        }
+        Ok(self.inner.delete(filename, Durability::Strict)?)
+    }
+
+    fn clear(&self) -> Result<(), Self::Error> {
+        context::check_entry()?;
+        if !self.inner.files.borrow().is_empty() {
+            return Err(JspiIdbError::FilesInUse);
+        }
+        self.inner
+            .idb
+            .clear()
+            .map_err(|err| JspiIdbError::js("clear the IndexedDB database", err))
+    }
+
+    fn contains(&self, filename: &str) -> Result<bool, Self::Error> {
+        context::check_entry()?;
+        Ok(self.inner.exists(filename)?)
+    }
+
+    fn names(&self) -> Result<Vec<String>, Self::Error> {
+        context::check_entry()?;
+        self.inner
+            .idb
+            .names()
+            .map_err(|err| JspiIdbError::js("list files", err))
+    }
+
+    fn len(&self) -> Result<usize, Self::Error> {
+        self.names().map(|names| names.len())
+    }
+}
+
 fn validate(cfg: &JspiIdbCfg) -> Result<(), JspiIdbError> {
     let invalid = |reason| Err(JspiIdbError::InvalidConfiguration(reason));
     if cfg.vfs_name.is_empty() || cfg.vfs_name.contains('\0') {
@@ -474,20 +578,46 @@ fn validate(cfg: &JspiIdbCfg) -> Result<(), JspiIdbError> {
     Ok(())
 }
 
-/// Installs the VFS. Needs no JSPI context.
+/// Returns the installed VFS matching `cfg`, or why `cfg` cannot be installed.
+fn installed(cfg: &JspiIdbCfg, os_type: TypeId) -> Result<Option<JspiIdbUtil>, JspiIdbError> {
+    INSTALLED.with_borrow(|installed| {
+        if let Some(inner) = installed.get(&cfg.vfs_name) {
+            if inner.cfg != *cfg || inner.os_type != os_type {
+                return Err(JspiIdbError::ConfigurationMismatch(cfg.vfs_name.clone()));
+            }
+            return Ok(Some(JspiIdbUtil {
+                inner: inner.clone(),
+            }));
+        }
+        // Two registries over one database would wait on each other's Web Locks.
+        if installed
+            .values()
+            .any(|inner| inner.cfg.database == cfg.database)
+        {
+            return Err(JspiIdbError::DatabaseInUse(cfg.database.clone()));
+        }
+        Ok(None)
+    })
+}
+
+/// Installs the VFS, or returns the one already installed with this configuration.
 ///
-/// `default_vfs = true` makes it SQLite's default VFS, and the registration
-/// lasts for the lifetime of the module.
+/// Needs no JSPI context. `default_vfs = true` makes it SQLite's default VFS,
+/// and the registration lasts for the lifetime of the module.
 ///
 /// # Errors
 ///
-/// An invalid `cfg`, a context without JSPI, IndexedDB or Web Locks, and
-/// failures of IndexedDB or SQLite registration, a name already in use included.
+/// An invalid `cfg`, a context without JSPI, IndexedDB or Web Locks, a name
+/// installed differently or a database used by another VFS of this context,
+/// and failures of IndexedDB or SQLite registration.
 pub async fn install<C: OsCallback + Default + 'static>(
     cfg: &JspiIdbCfg,
     default_vfs: bool,
-) -> Result<(), JspiIdbError> {
+) -> Result<JspiIdbUtil, JspiIdbError> {
     validate(cfg)?;
+    if let Some(util) = installed(cfg, TypeId::of::<C>())? {
+        return Ok(util);
+    }
     context::check_jspi()?;
     let locks = Reflect::get(&js_sys::global(), &"navigator".into())
         .and_then(|navigator| Reflect::get(&navigator, &"locks".into()))
@@ -496,6 +626,11 @@ pub async fn install<C: OsCallback + Default + 'static>(
         .ok_or(JspiIdbError::WebLocksUnavailable)?;
 
     let db = idb::open(&cfg.database, cfg.io_timeout).await?;
+    // Another install may have finished while this one awaited IndexedDB.
+    if let Some(util) = installed(cfg, TypeId::of::<C>()).inspect_err(|_| db.close())? {
+        db.close();
+        return Ok(util);
+    }
     let on_version_change = Closure::<dyn FnMut(Event)>::new({
         let db = db.clone();
         move |_event| db.close()
@@ -503,6 +638,8 @@ pub async fn install<C: OsCallback + Default + 'static>(
     db.set_onversionchange(Some(on_version_change.as_ref().unchecked_ref()));
 
     let inner = Rc::new(Inner {
+        cfg: cfg.clone(),
+        os_type: TypeId::of::<C>(),
         os: Box::new(JspiOs(C::default())),
         idb: Idb {
             db: db.clone(),
@@ -513,14 +650,16 @@ pub async fn install<C: OsCallback + Default + 'static>(
         lock_timeout: cfg.lock_timeout,
         files: RefCell::new(HashMap::new()),
         last_error: RefCell::new(None),
+        sidecars: RefCell::new(HashMap::new()),
         _on_version_change: on_version_change,
     });
 
     // SAFETY: the default VFS constructor and file layout agree with
     // `JspiIdbIoMethods` and `JspiIdbStore`, whose app data is `Rc<Inner>`.
     // The registration is never freed, and every callback stays on this thread.
-    let registration =
-        unsafe { register_vfs::<JspiIdbIoMethods, JspiIdbVfs>(&cfg.vfs_name, inner, default_vfs) };
+    let registration = unsafe {
+        register_vfs::<JspiIdbIoMethods, JspiIdbVfs>(&cfg.vfs_name, inner.clone(), default_vfs)
+    };
     match registration {
         Ok(registration) => {
             registration.into_raw();
@@ -531,5 +670,6 @@ pub async fn install<C: OsCallback + Default + 'static>(
             return Err(err.into());
         }
     }
-    Ok(())
+    INSTALLED.with_borrow_mut(|installed| installed.insert(cfg.vfs_name.clone(), inner.clone()));
+    Ok(JspiIdbUtil { inner })
 }

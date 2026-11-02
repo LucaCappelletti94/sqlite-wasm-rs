@@ -229,8 +229,11 @@ impl Idb {
     }
 
     pub(crate) fn meta(&self, name: &str) -> Result<Option<Meta>, JsValue> {
-        let mut metas = self.get_many(FILES, std::iter::once(name.into()), parse_meta)?;
-        Ok(metas.pop().flatten())
+        Ok(self.metas(&[name])?.pop().flatten())
+    }
+
+    pub(crate) fn metas(&self, names: &[&str]) -> Result<Vec<Option<Meta>>, JsValue> {
+        self.get_many(FILES, names.iter().map(|&name| name.into()), parse_meta)
     }
 
     pub(crate) fn blocks(
@@ -304,5 +307,31 @@ impl Idb {
         })?;
         self.commit(&tx)?;
         Ok(!existing.result()?.is_undefined())
+    }
+
+    pub(crate) fn names(&self) -> Result<Vec<String>, JsValue> {
+        let tx = self.transaction(&[FILES], IdbTransactionMode::Readonly, Durability::Default)?;
+        let request = tx.object_store(FILES)?.get_all_keys()?;
+        self.commit(&tx)?;
+        Array::from(&request.result()?)
+            .iter()
+            .map(|key| {
+                key.as_string()
+                    .ok_or_else(|| JsValue::from_str("malformed file name in IndexedDB"))
+            })
+            .collect()
+    }
+
+    pub(crate) fn clear(&self) -> Result<(), JsValue> {
+        let tx = self.transaction(
+            &[FILES, BLOCKS],
+            IdbTransactionMode::Readwrite,
+            Durability::Strict,
+        )?;
+        issue(&tx, || {
+            tx.object_store(FILES)?.clear()?;
+            tx.object_store(BLOCKS)?.clear()
+        })?;
+        self.commit(&tx)
     }
 }
